@@ -1,0 +1,45 @@
+sequenceDiagram
+    participant User as 用户
+    participant SI as SidebarItem组件
+    participant CM as ConfirmModal组件
+    participant App as App组件
+    participant API as 后端API
+    participant Fetch as fetchUserPosts()
+    participant SSE as SSE推送
+
+    User->>SI: 点击"全量抓取"按钮（橙色醒目）
+    SI->>CM: 弹出确认弹窗
+    Note over CM: "即将对 [用户名] 进行全量抓取，<br/>可能耗时较长，是否继续？"
+
+    alt 用户取消
+        User->>CM: 点击取消
+        CM->>SI: 关闭弹窗，无操作
+    else 用户确认
+        User->>CM: 点击确认
+        CM->>App: handleForceFullFetch(uid)
+        App->>API: POST /api/fetch/{uid} {incremental: false, force: true}
+
+        API->>API: 检查 force 参数
+        Note over API: force=true → 跳过 v0.1.0 的<br/>"有数据自动转增量"逻辑
+
+        API->>Fetch: enqueueFetch(uid, false)  // incremental=false
+        API-->>App: {success: true, message: "强制全量抓取已启动"}
+
+        App->>App: toast("强制全量抓取已启动")
+
+        Fetch->>Fetch: fetchUserPosts(uid, isIncremental=false)
+        Note over Fetch: incremental=false → 不做增量检测<br/>从头翻页，覆盖更新已有帖子
+
+        Fetch->>SSE: updateProgress(uid, {status:'fetching', message:'强制全量抓取...', fullFetchMode:true})
+        SSE-->>App: SSE 推送进度
+
+        Note over App: 前端检测 fullFetchMode=true<br/>显示"全量模式"标签
+
+        Fetch->>Fetch: 翻页抓取所有帖子...
+        Fetch->>Fetch: 合并逻辑：新数据覆盖旧数据<br/>（以 mid 为 key，用新抓取版本替换）
+
+        Fetch->>SSE: updateProgress(uid, {status:'success', message:'全量抓取完成'})
+        SSE-->>App: SSE 推送完成
+
+        App->>App: 自动刷新帖子列表
+    end

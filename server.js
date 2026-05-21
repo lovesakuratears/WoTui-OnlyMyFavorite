@@ -1,7 +1,16 @@
 /**
- * server.js - 微博归档系统后端服务 v0.0.2
+ * server.js - 微博归档系统后端服务 v0.2.0
  *
  * 变更记录：
+ *   v0.2.0 - 搜索 API / 全量强制抓取(force) / 全量覆盖更新 / 图片下载 / health 返回版本号
+ *   v0.1.0 - 全量只允许首次（有数据自动增量）/ 已有帖子缺图片补全 / Cookie失效后图片不再丢失
+ *   v0.0.9 - 全量抓取后台持续运行（页面关闭不影响）/ 已有图片+帖子检测跳过 / 启动时自动恢复断点任务
+ *   v0.0.8 - 并发任务队列（多订阅并行抓取）/ 终止抓取+断点恢复 / Cookie失效时先保存已抓数据再报错
+ *   v0.0.7 - 修复 Playwright 浏览器内存泄漏（根因：browser 实例从不关闭）/ 优雅退出 / 进程 detach
+ *   v0.0.6 - 增量保存（每下载完一个帖子的图片就保存进度）/ 进程防崩溃保护 / 图片下载重试+0字节检测
+ *   v0.0.5 - 登录改为用户手动确认（去除误判）/ 加宽松随机延迟防封IP / 内存LRU缓存加速读取
+ *   v0.0.4 - 修复登录流程：改用 m.weibo.cn 移动端 / 防止误判登录成功 / 移动端 API 抓取
+ *   v0.0.3 - 修复 403 反爬（改用 Playwright 浏览器上下文执行 API 请求） / 修复退出按钮 confirm 拦截
  *   v0.0.2 - 结构化日志系统 / 修复抓取 Bug / SSE 实时进度 / 登录状态验证
  *   v0.0.1 - 自动登录 / Cookie 持久化 / 真实数据抓取
  */
@@ -115,7 +124,7 @@ function createLogger(module_) {
 }
 
 const logger = createLogger('App');
-logger.info('微博归档器 v0.0.2 启动中...', { logLevel: Object.keys(LOG_LEVELS).find(k => LOG_LEVELS[k] === CURRENT_LOG_LEVEL) });
+logger.info('微博归档器 v0.2.0 启动中...', { logLevel: Object.keys(LOG_LEVELS).find(k => LOG_LEVELS[k] === CURRENT_LOG_LEVEL) });
 
 // ─── 中间件 ────────────────────────────────────────────────────────────────────
 
@@ -141,6 +150,96 @@ const schedulers = new Map();
 const fetchStatus = new Map(); // uid -> { status, message, progress, lastFetch }
 let loginBrowser = null;
 let isLoggedIn = false;
+
+// v0.0.5：用于手动确认登录的浏览器上下文（全局持有，直到用户确认或超时）
+let pendingLoginContext = null;
+let pendingLoginPage = null;
+
+// ─── v0.0.8：并发任务队列 + 终止信号 ─────────────────────────────────────────
+
+const MAX_CONCURRENT_FETCHES = 2; // 最大并发抓取数
+const fetchQueue = []; // 等待执行的任务
+const activeFetches = new Map(); // uid -> AbortController（正在执行的）
+const abortControllers = new Map(); // uid -> AbortController（终止信号，跨函数访问）
+
+function enqueueFetch(uid, isIncremental) {
+  // 同一 uid 不重复排队
+  if (activeFetches.has(uid)) {
+    return { queued: false, reason: '正在抓取中' };
+  }
+  if (fetchQueue.find(t => t.uid === uid)) {
+    return { queued: false, reason: '已在队列中' };
+  }
+
+  fetchQueue.push({ uid, isIncremental, enqueuedAt: Date.now() });
+  createLogger('FetchQueue').info(`任务入队`, { uid, isIncremental, queueLen: fetchQueue.length });
+
+  // 尝试立即执行
+  processQueue();
+  return { queued: true, queueLen: fetchQueue.length };
+}
+
+function processQueue() {
+  const qLog = createLogger('FetchQueue');
+  while (activeFetches.size < MAX_CONCURRENT_FETCHES && fetchQueue.length > 0) {
+    const task = fetchQueue.shift();
+    if (!task) break;
+
+    const ac = new AbortController();
+    activeFetches.set(task.uid, ac);
+    abortControllers.set(task.uid, ac);
+
+    qLog.info(`开始执行任务`, { uid: task.uid, activeCount: activeFetches.size, remaining: fetchQueue.length });
+
+    // 执行抓取
+    fetchUserPosts(task.uid, task.isIncremental, ac.signal)
+      .catch(err => {
+        qLog.error(`任务异常`, { uid: task.uid, err: err.message });
+      })
+      .finally(() => {
+        activeFetches.delete(task.uid);
+        abortControllers.delete(task.uid);
+        qLog.info(`任务完成`, { uid: task.uid, activeCount: activeFetches.size, remaining: fetchQueue.length });
+        // 继续处理队列
+        processQueue();
+      });
+  }
+}
+
+function abortFetch(uid) {
+  const ac = abortControllers.get(uid);
+  if (ac) {
+    ac.abort();
+    createLogger('FetchQueue').info(`发送终止信号`, { uid });
+    return true;
+  }
+  // 也检查队列中的
+  const idx = fetchQueue.findIndex(t => t.uid === uid);
+  if (idx >= 0) {
+    fetchQueue.splice(idx, 1);
+    createLogger('FetchQueue').info(`从队列中移除`, { uid });
+    return true;
+  }
+  return false;
+}
+
+async function closePendingLogin() {
+  try { if (pendingLoginContext) { await pendingLoginContext.close(); } } catch (_) {}
+  try { if (loginBrowser) { await loginBrowser.close(); loginBrowser = null; } } catch (_) {}
+  pendingLoginContext = null;
+  pendingLoginPage = null;
+}
+
+// ─── 进程防崩溃保护 ──────────────────────────────────────────────────────────
+
+process.on('unhandledRejection', (reason, promise) => {
+  createLogger('Process').error(`未捕获的 Promise 异常: ${reason}`);
+});
+
+process.on('uncaughtException', (err) => {
+  createLogger('Process').error(`未捕获的同步异常: ${err.message}`, { stack: err.stack?.slice(0, 500) });
+  // 不退出进程，尝试继续运行（仅日志记录）
+});
 
 // ─── 工具函数 ──────────────────────────────────────────────────────────────────
 
@@ -176,8 +275,45 @@ function extractUid(input) {
   return null;
 }
 
-function randomDelay(min = 800, max = 2500) {
+// ─── 速率限制配置（可按需调整，防 IP 封禁）──────────────────────────────────────
+
+const RATE_LIMIT = {
+  // 翻页抓取之间的随机延迟（毫秒）
+  PAGE_DELAY_MIN: 2000,
+  PAGE_DELAY_MAX: 5000,
+  // 图片下载之间的随机延迟（毫秒）
+  IMAGE_DELAY_MIN: 800,
+  IMAGE_DELAY_MAX: 2000,
+  // 连续多帖抓取完一批后的额外冷却（毫秒）
+  BATCH_COOLDOWN: 3000,
+};
+
+function randomDelay(min = RATE_LIMIT.PAGE_DELAY_MIN, max = RATE_LIMIT.PAGE_DELAY_MAX) {
   return new Promise(r => setTimeout(r, Math.floor(Math.random() * (max - min + 1)) + min));
+}
+
+// ─── 内存 LRU 缓存（帖子列表加速，避免每次都读大文件）─────────────────────────
+
+const POST_CACHE_TTL = 60 * 1000; // 60 秒过期
+const postCache = new Map(); // uid -> { data, ts }
+
+function cacheGet(uid) {
+  const entry = postCache.get(uid);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > POST_CACHE_TTL) {
+    postCache.delete(uid);
+    return null;
+  }
+  return entry.data;
+}
+
+function cacheSet(uid, data) {
+  postCache.set(uid, { data, ts: Date.now() });
+}
+
+function cacheInvalidate(uid) {
+  if (uid) postCache.delete(uid);
+  else postCache.clear();
 }
 
 // ─── 进度推送（SSE 增强版） ─────────────────────────────────────────────────────
@@ -208,25 +344,67 @@ function updateProgress(uid, update) {
 
 const imgLogger = createLogger('Image');
 
-async function downloadImage(url, destPath, cookieStr) {
-  try {
-    ensureDir(path.dirname(destPath));
-    const resp = await axios.get(url, {
-      responseType: 'arraybuffer',
-      timeout: 25000,
-      headers: {
-        Referer: 'https://weibo.com',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        ...(cookieStr ? { Cookie: cookieStr } : {}),
-      },
-    });
-    fs.writeFileSync(destPath, Buffer.from(resp.data));
-    imgLogger.debug(`下载成功: ${path.basename(destPath)}`);
-    return true;
-  } catch (err) {
-    imgLogger.warn(`下载失败: ${url}`, { err: err.message });
-    return false;
+const IMAGE_MAX_RETRIES = 2; // 最多重试 2 次
+
+/**
+ * 下载单张图片（带重试 + 0 字节检测）
+ * @param {string} url
+ * @param {string} destPath
+ * @param {string} cookieStr
+ * @param {number} retries - 剩余重试次数
+ * @returns {Promise<boolean>}
+ */
+async function downloadImage(url, destPath, cookieStr, retries = IMAGE_MAX_RETRIES) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      ensureDir(path.dirname(destPath));
+
+      // 如果文件已存在且 > 0 字节，跳过
+      if (fs.existsSync(destPath)) {
+        const stat = fs.statSync(destPath);
+        if (stat.size > 0) {
+          imgLogger.debug(`文件已存在，跳过: ${path.basename(destPath)}`);
+          return true;
+        }
+        // 0 字节文件 → 删除重下
+        imgLogger.warn(`0 字节文件，删除重下: ${path.basename(destPath)}`);
+        fs.unlinkSync(destPath);
+      }
+
+      const resp = await axios.get(url, {
+        responseType: 'arraybuffer',
+        timeout: 15000, // v0.0.6: 从 25s 缩短到 15s
+        headers: {
+          Referer: 'https://weibo.com',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          ...(cookieStr ? { Cookie: cookieStr } : {}),
+        },
+      });
+
+      const buf = Buffer.from(resp.data);
+      if (buf.length === 0) {
+        imgLogger.warn(`下载到空数据: ${url}`);
+        if (attempt < retries) {
+          imgLogger.info(`重试 ${attempt + 1}/${retries}: ${path.basename(destPath)}`);
+          await randomDelay(1000, 2000);
+          continue;
+        }
+        return false;
+      }
+
+      fs.writeFileSync(destPath, buf);
+      imgLogger.debug(`下载成功: ${path.basename(destPath)} (${(buf.length / 1024).toFixed(1)}KB)`);
+      return true;
+    } catch (err) {
+      imgLogger.warn(`下载失败 (尝试 ${attempt + 1}/${retries + 1}): ${url}`, { err: err.message });
+      if (attempt < retries) {
+        await randomDelay(1000, 2000);
+        continue;
+      }
+      return false;
+    }
   }
+  return false;
 }
 
 // ─── Cookie 管理 ───────────────────────────────────────────────────────────────
@@ -253,56 +431,56 @@ function checkLoginFromCookies(cookies) {
 }
 
 /**
- * 验证 Cookie 是否真实有效（调用微博 API 验证）
- * @param {string} cookieStr
+ * 验证 Cookie 是否真实有效（通过浏览器上下文调用微博 API 验证）
+ * @param {string|Array} cookieInput - Cookie 字符串或数组
  * @returns {Promise<{valid: boolean, uid?: string, name?: string, error?: string}>}
  */
-async function verifyCookieOnline(cookieStr) {
+async function verifyCookieOnline(cookieInput) {
   const vLogger = createLogger('CookieVerify');
   try {
-    // 访问微博个人信息接口，如果返回用户数据说明 Cookie 有效
-    const resp = await axios.get('https://weibo.com/ajax/account/loginInfo', {
-      timeout: 10000,
-      headers: {
-        Cookie: cookieStr,
-        Referer: 'https://weibo.com',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Accept: 'application/json, text/plain, */*',
-      },
-    });
+    // 兼容字符串或数组
+    let cookies = cookieInput;
+    if (typeof cookieInput === 'string') {
+      cookies = cookieInput.split(';').map(pair => {
+        const idx = pair.indexOf('=');
+        if (idx === -1) return null;
+        const name = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
+        return name ? { name, value, domain: '.weibo.com', path: '/' } : null;
+      }).filter(Boolean);
+    }
 
-    if (resp.data) {
-      // loginInfo 接口：返回 { data: { login: true, uid, screen_name } }
-      const d = resp.data.data || resp.data;
-      if (d.login === true || d.islogin === 1 || d.uid) {
-        vLogger.info('Cookie 验证成功', { uid: d.uid, name: d.screen_name });
+    // 优先用移动端 API 验证（更稳定，不容易 403）
+    const mobileResult = await browserFetch('https://m.weibo.cn/api/config', cookies, 'https://m.weibo.cn');
+    if (mobileResult.ok && mobileResult.data) {
+      const d = mobileResult.data.data || mobileResult.data;
+      // m.weibo.cn/api/config 返回 { data: { uid: "xxx", screen_name: "xxx", login: true } }
+      if (d.login === true || d.uid) {
+        vLogger.info('Cookie 验证成功（移动端）', { uid: d.uid, name: d.screen_name });
         return { valid: true, uid: String(d.uid || ''), name: d.screen_name || '' };
       }
     }
 
-    // 备用：尝试 profile/me 接口
-    const resp2 = await axios.get('https://weibo.com/ajax/profile/me', {
-      timeout: 8000,
-      headers: {
-        Cookie: cookieStr,
-        Referer: 'https://weibo.com',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      },
-    });
-    if (resp2.data && resp2.data.data) {
-      const u = resp2.data.data;
-      if (u.id || u.uid) {
-        vLogger.info('Cookie 验证成功（备用接口）', { uid: u.id || u.uid });
-        return { valid: true, uid: String(u.id || u.uid || ''), name: u.screen_name || '' };
+    // 备用：PC 端 loginInfo 接口
+    const pcResult = await browserFetch('https://weibo.com/ajax/account/loginInfo', cookies, 'https://weibo.com');
+    if (pcResult.ok && pcResult.data) {
+      const d = pcResult.data.data || pcResult.data;
+      if (d.login === true || d.islogin === 1 || d.uid) {
+        vLogger.info('Cookie 验证成功（PC 端）', { uid: d.uid, name: d.screen_name });
+        return { valid: true, uid: String(d.uid || ''), name: d.screen_name || '' };
       }
     }
 
+    if (pcResult.status === 403 || pcResult.loginRequired) {
+      vLogger.warn('Cookie 验证返回 403，Cookie 已失效');
+      return { valid: false, error: 'Cookie 已失效，请重新登录' };
+    }
+
     vLogger.warn('Cookie 存在但未检测到登录态');
-    return { valid: false, error: 'Cookie 已失效，请重新登录' };
+    return { valid: false, error: 'Cookie 无效或已过期' };
   } catch (err) {
-    vLogger.warn(`Cookie 在线验证失败: ${err.message}`);
-    // 网络问题时降级为本地检查
-    return { valid: null, error: `网络验证失败: ${err.message}（已降级为本地检查）` };
+    vLogger.warn(`Cookie 在线验证异常: ${err.message}`);
+    return { valid: null, error: `验证异常: ${err.message}` };
   }
 }
 
@@ -344,7 +522,14 @@ function getLoginStatus() {
 }
 
 /**
- * 打开登录窗口，等待用户完成登录，自动保存并验证 Cookie
+ * 打开登录窗口，等待用户手动点击"我已完成登录"按钮后采集并验证 Cookie
+ *
+ * v0.0.5 变更：
+ * - 完全移除自动 Cookie 轮询检测（根本原因：未登录时 Cookie 文件就存在会导致误判）
+ * - 浏览器窗口打开后，通过 SSE 推送 loginWindowOpen 状态
+ * - 前端展示"我已完成登录"手动确认按钮
+ * - 用户点击后，服务端接收 /api/auth/confirm-login 请求才真正采集 Cookie 并验证
+ * - 浏览器 context 保持活跃，直到确认或超时才关闭
  */
 async function openLoginWindow() {
   if (loginBrowser) {
@@ -352,89 +537,69 @@ async function openLoginWindow() {
     loginBrowser = null;
   }
 
-  loginLogger.info('打开登录窗口...');
+  loginLogger.info('打开登录窗口（移动端）...');
 
-  loginBrowser = await chromium.launch({ headless: false, args: BROWSER_ARGS });
-  const context = await loginBrowser.newContext({ ...CONTEXT_OPTIONS });
+  const mobileContextOptions = {
+    userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+    viewport: { width: 390, height: 844 },
+    locale: 'zh-CN',
+    timezoneId: 'Asia/Shanghai',
+    extraHTTPHeaders: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
+    isMobile: true,
+    hasTouch: true,
+  };
+
+  loginBrowser = await chromium.launch({
+    headless: false,
+    args: [...BROWSER_ARGS, '--window-size=420,900'],
+  });
+  const context = await loginBrowser.newContext(mobileContextOptions);
   await context.addInitScript(INIT_SCRIPT);
+  const page = await context.newPage();
 
-  // 注入已有 Cookie
-  const existing = loadCookies();
-  if (existing.length > 0) {
-    try { await context.addCookies(existing); } catch (_) {}
+  await page.goto('https://m.weibo.cn/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  loginLogger.info('登录窗口已打开 (m.weibo.cn)，等待用户操作...');
+
+  // 推送 SSE：窗口已打开，等待用户手动确认
+  const openPayload = `data: ${JSON.stringify({
+    type: 'loginWindowOpen',
+    message: '请在弹出的浏览器窗口中完成登录，完成后点击「我已完成登录」按钮',
+  })}\n\n`;
+  for (const client of sseClients) {
+    try { client.write(openPayload); } catch (_) { sseClients.delete(client); }
   }
 
-  const page = await context.newPage();
-  await page.goto('https://weibo.com/login.php', { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // 将 context 挂载到全局，供 confirmLogin 接口使用
+  pendingLoginContext = context;
+  pendingLoginPage = page;
 
-  loginLogger.info('登录窗口已打开，等待用户操作...');
+  // 10 分钟超时自动关闭
+  const timeoutTimer = setTimeout(async () => {
+    loginLogger.warn('登录超时（10分钟），自动关闭');
+    const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '登录超时（10分钟），请重试' })}\n\n`;
+    for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+    await closePendingLogin();
+  }, 10 * 60 * 1000);
 
-  return new Promise((resolve) => {
-    let resolved = false;
-    let checkInterval = null;
-
-    const finish = async (result) => {
-      if (resolved) return;
-      resolved = true;
-      if (checkInterval) clearInterval(checkInterval);
-      isLoggedIn = result.success;
-      resolve(result);
-    };
-
-    checkInterval = setInterval(async () => {
-      try {
-        const currentUrl = page.url();
-        const cookies = await context.cookies();
-        const hasLoginCookie = checkLoginFromCookies(cookies);
-
-        if (hasLoginCookie || (currentUrl.includes('weibo.com') && !currentUrl.includes('login'))) {
-          // 等待页面稳定后再保存（避免拿到登录中间态 Cookie）
-          await page.waitForTimeout(1500);
-          const finalCookies = await context.cookies(['https://weibo.com', 'https://www.weibo.com', 'https://passport.weibo.com']);
-
-          saveCookies(finalCookies);
-          loginLogger.info('Cookie 已保存，正在在线验证...');
-
-          const verifyResult = await verifyCookieOnline(cookiesToString(finalCookies));
-
-          setTimeout(async () => {
-            try { await context.close(); await loginBrowser.close(); loginBrowser = null; } catch (_) {}
-          }, 2000);
-
-          if (verifyResult.valid === true) {
-            loginLogger.info('登录验证成功', { uid: verifyResult.uid, name: verifyResult.name });
-            await finish({ success: true, message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`, userInfo: verifyResult });
-          } else if (verifyResult.valid === false) {
-            loginLogger.warn('Cookie 无效', { error: verifyResult.error });
-            await finish({ success: false, message: verifyResult.error });
-          } else {
-            // 网络验证失败，降级通过
-            loginLogger.warn('在线验证失败，降级接受 Cookie');
-            await finish({ success: true, message: 'Cookie 已保存（网络验证跳过）', userInfo: {} });
-          }
-        }
-      } catch (err) {
-        loginLogger.error(`登录检测异常: ${err.message}`);
-        if (!resolved) await finish({ success: false, message: `检测异常: ${err.message}` });
+  // 用户手动关闭窗口时的处理
+  page.on('close', async () => {
+    if (!pendingLoginContext) return; // 已被 confirmLogin 处理
+    clearTimeout(timeoutTimer);
+    loginLogger.info('用户手动关闭了登录窗口（未确认）');
+    // 也尝试采集一次 Cookie
+    try {
+      const cookies = await context.cookies().catch(() => []);
+      if (checkLoginFromCookies(cookies)) {
+        saveCookies(cookies);
+        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: '窗口已关闭，Cookie 已自动保存' })}\n\n`;
+        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+        isLoggedIn = true;
+      } else {
+        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未检测到登录 Cookie' })}\n\n`;
+        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
       }
-    }, 2000);
-
-    page.on('close', async () => {
-      if (resolved) return;
-      try {
-        const cookies = await context.cookies();
-        if (checkLoginFromCookies(cookies)) {
-          saveCookies(cookies);
-          await finish({ success: true, message: '窗口关闭，Cookie 已保存' });
-        } else {
-          await finish({ success: false, message: '窗口已关闭，未检测到登录态' });
-        }
-      } catch (_) {
-        await finish({ success: false, message: '窗口已关闭' });
-      }
-    });
-
-    setTimeout(() => finish({ success: false, message: '登录超时（5分钟），请重试' }), 5 * 60 * 1000);
+    } catch (_) {}
+    await closePendingLogin();
   });
 }
 
@@ -449,21 +614,136 @@ function logout() {
 const fetchLogger = createLogger('Fetch');
 
 /**
- * 获取用户资料（API 接口）
+ * 使用 Playwright 浏览器上下文发起 API 请求（绕过 403 反爬）
+ * 浏览器上下文持有真实 Cookie、UA、语言等，与手动浏览器完全一致
  */
-async function fetchUserProfile(uid, cookieStr) {
+let sharedBrowserContext = null; // 复用一个后台浏览器上下文，避免每次都启动新浏览器
+let sharedBrowser = null; // v0.0.7：保存 browser 引用，避免泄漏
+
+async function getSharedContext(cookies) {
+  const ctxLogger = createLogger('BrowserCtx');
   try {
-    const resp = await axios.get(`https://weibo.com/ajax/profile/info?uid=${uid}`, {
-      timeout: 10000,
-      headers: {
-        Cookie: cookieStr,
-        Referer: `https://weibo.com/u/${uid}`,
-        'User-Agent': CONTEXT_OPTIONS.userAgent,
-        Accept: 'application/json, text/plain, */*',
-      },
+    // 如果已有上下文，检查是否还活着
+    if (sharedBrowserContext) {
+      try {
+        // 尝试一个轻量操作验证上下文是否有效
+        await sharedBrowserContext.cookies();
+        return sharedBrowserContext;
+      } catch (_) {
+        ctxLogger.warn('浏览器上下文已失效，重新创建');
+        // v0.0.7：正确关闭旧 browser，防止泄漏
+        try { if (sharedBrowserContext) await sharedBrowserContext.close(); } catch (_) {}
+        try { if (sharedBrowser) await sharedBrowser.close(); } catch (_) {}
+        sharedBrowserContext = null;
+        sharedBrowser = null;
+      }
+    }
+
+    ctxLogger.info('创建后台浏览器上下文...');
+    sharedBrowser = await chromium.launch({ headless: true, args: BROWSER_ARGS });
+    const context = await sharedBrowser.newContext({ ...CONTEXT_OPTIONS });
+    await context.addInitScript(INIT_SCRIPT);
+
+    // 注入 Cookie
+    if (cookies && cookies.length > 0) {
+      try { await context.addCookies(cookies); } catch (e) {
+        ctxLogger.warn('注入 Cookie 失败', { err: e.message });
+      }
+    }
+
+    sharedBrowserContext = context;
+    ctxLogger.info('后台浏览器上下文已就绪');
+    return context;
+  } catch (err) {
+    ctxLogger.error(`创建浏览器上下文失败: ${err.message}`);
+    // 失败时清理
+    try { if (sharedBrowserContext) await sharedBrowserContext.close(); } catch (_) {}
+    try { if (sharedBrowser) await sharedBrowser.close(); } catch (_) {}
+    sharedBrowserContext = null;
+    sharedBrowser = null;
+    throw err;
+  }
+}
+
+/**
+ * 通过浏览器上下文发起 JSON API 请求（绕过微博 403 反爬）
+ */
+async function browserFetch(url, cookies, referer) {
+  const bfLogger = createLogger('BrowserFetch');
+  let page = null;
+  try {
+    const context = await getSharedContext(cookies);
+    page = await context.newPage();
+
+    // 设置额外请求头
+    await page.setExtraHTTPHeaders({
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+      'X-Requested-With': 'XMLHttpRequest',
+      'Referer': referer || 'https://weibo.com',
     });
-    if (resp.data?.data?.user) {
-      const u = resp.data.data.user;
+
+    bfLogger.debug(`浏览器请求: ${url}`);
+
+    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    if (!response) {
+      bfLogger.warn('页面响应为空');
+      return { ok: false, status: 0, data: null };
+    }
+
+    const status = response.status();
+    bfLogger.debug(`响应状态: ${status}`, { url });
+
+    if (status === 403) {
+      bfLogger.warn('收到 403，Cookie 可能已失效或需要重新验证');
+      return { ok: false, status: 403, data: null, loginRequired: true };
+    }
+
+    if (status !== 200) {
+      bfLogger.warn(`非 200 响应: ${status}`);
+      return { ok: false, status, data: null };
+    }
+
+    // 提取页面内容（JSON）
+    const text = await page.evaluate(() => document.body.innerText || document.body.textContent);
+    try {
+      const data = JSON.parse(text);
+      return { ok: true, status, data };
+    } catch (_) {
+      bfLogger.warn('响应不是有效 JSON', { preview: text.slice(0, 200) });
+      return { ok: false, status, data: null, rawText: text };
+    }
+  } catch (err) {
+    bfLogger.error(`浏览器请求失败: ${err.message}`, { url });
+    // v0.0.7：上下文可能已损坏，正确清理并重置
+    try { if (sharedBrowserContext) await sharedBrowserContext.close(); } catch (_) {}
+    try { if (sharedBrowser) await sharedBrowser.close(); } catch (_) {}
+    sharedBrowserContext = null;
+    sharedBrowser = null;
+    return { ok: false, status: 0, data: null, error: err.message };
+  } finally {
+    if (page) {
+      try { await page.close(); } catch (_) {}
+    }
+  }
+}
+
+/**
+ * 获取用户资料
+ * 优先尝试移动端 API（m.weibo.cn），失败再回落到 PC 端
+ */
+async function fetchUserProfile(uid, cookies) {
+  // 先尝试移动端 API
+  const mobileUrl = `https://m.weibo.cn/api/container/getIndex?type=uid&value=${uid}`;
+  const mobileResult = await browserFetch(mobileUrl, cookies, `https://m.weibo.cn/u/${uid}`);
+
+  if (mobileResult.ok && mobileResult.data) {
+    const d = mobileResult.data;
+    // 移动端返回结构：{ ok: 1, data: { userInfo: {...} } }
+    const u = d.data?.userInfo;
+    if (u && (u.screen_name || u.id)) {
+      fetchLogger.info(`获取用户资料成功（移动端）`, { name: u.screen_name });
       return {
         name: u.screen_name || '',
         avatar: u.avatar_hd || u.profile_image_url || u.avatar_large || '',
@@ -475,62 +755,166 @@ async function fetchUserProfile(uid, cookieStr) {
         verifiedReason: u.verified_reason || '',
       };
     }
-    return null;
-  } catch (err) {
-    fetchLogger.warn(`获取用户资料失败 uid=${uid}`, { err: err.message });
+  }
+
+  // 回落到 PC 端
+  const pcUrl = `https://weibo.com/ajax/profile/info?uid=${uid}`;
+  const pcResult = await browserFetch(pcUrl, cookies, `https://weibo.com/u/${uid}`);
+
+  if (!pcResult.ok || !pcResult.data) {
+    fetchLogger.warn(`获取用户资料失败 uid=${uid}`, { mobileStatus: mobileResult.status, pcStatus: pcResult.status });
     return null;
   }
+
+  if (pcResult.data?.data?.user) {
+    const u = pcResult.data.data.user;
+    return {
+      name: u.screen_name || '',
+      avatar: u.avatar_hd || u.profile_image_url || u.avatar_large || '',
+      description: u.description || '',
+      followers: u.followers_count || 0,
+      friends: u.friends_count || 0,
+      statuses: u.statuses_count || 0,
+      verified: u.verified || false,
+      verifiedReason: u.verified_reason || '',
+    };
+  }
+  return null;
 }
 
 /**
  * 从微博 API 获取帖子列表（单页）
+ * 优先移动端 m.weibo.cn/api（反爬更宽松），失败回落 PC 端
+ *
+ * v0.0.5 修复：移动端改用 since_id 翻页（page 参数只能翻几页就停了）
+ * @param {string} uid
+ * @param {Array} cookies
+ * @param {number} pageNum - 页码（仅 PC 端回落用）
+ * @param {string|null} sinceId - 移动端翻页标识（上一页返回的 cardlistInfo.since_id）
  */
-async function fetchWeiboApiPosts(uid, cookieStr, page = 1) {
-  const url = `https://weibo.com/ajax/statuses/mymblog?uid=${uid}&page=${page}&feature=0`;
-  fetchLogger.debug(`请求 API 第 ${page} 页`, { uid, url });
+async function fetchWeiboApiPosts(uid, cookies, pageNum = 1, sinceId = null) {
+  fetchLogger.debug(`请求 API 第 ${pageNum} 页（移动端, since_id=${sinceId || '首页'}）`, { uid, pageNum });
 
-  try {
-    const resp = await axios.get(url, {
-      timeout: 15000,
-      headers: {
-        Cookie: cookieStr,
-        Referer: `https://weibo.com/u/${uid}`,
-        'User-Agent': CONTEXT_OPTIONS.userAgent,
-        'X-Requested-With': 'XMLHttpRequest',
-        Accept: 'application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-      },
-    });
+  const containerId = `107603${uid}`;
+  // 移动端 API：首页不带 since_id，后续页带 since_id（而非 page 参数）
+  const mobileUrl = sinceId
+    ? `https://m.weibo.cn/api/container/getIndex?type=uid&value=${uid}&containerid=${containerId}&since_id=${sinceId}`
+    : `https://m.weibo.cn/api/container/getIndex?type=uid&value=${uid}&containerid=${containerId}`;
 
-    fetchLogger.debug(`API 响应 page=${page}`, {
-      status: resp.status,
-      hasData: !!resp.data?.data?.list,
-      count: resp.data?.data?.list?.length ?? 0,
-    });
+  const mobileResult = await browserFetch(mobileUrl, cookies, `https://m.weibo.cn/u/${uid}`);
 
-    if (resp.data?.data?.list) {
-      return { posts: parseApiPosts(resp.data.data.list), total: resp.data.data.total || 0 };
+  if (mobileResult.ok && mobileResult.data) {
+    const d = mobileResult.data;
+
+    // 移动端登录失效检测
+    if (d.ok === 0 || d.errno === 100 || (d.msg && (d.msg.includes('请登录') || d.msg.includes('login')))) {
+      fetchLogger.error('移动端 API 返回未登录', { uid, ok: d.ok, errno: d.errno });
+      return { posts: [], total: 0, loginRequired: true, nextSinceId: null };
     }
 
-    // 检测登录失效
-    if (resp.data?.errno === 20111 || resp.data?.msg?.includes('未登录') || resp.data?.msg?.includes('请先登录')) {
-      fetchLogger.error('Cookie 已失效，需要重新登录', { uid, errno: resp.data.errno });
-      return { posts: [], total: 0, loginRequired: true };
+    // 移动端帖子列表：cards 数组，card_type=9 的是微博卡片
+    const cards = d.data?.cards || [];
+    const weibos = cards
+      .filter(c => c.card_type === 9 && c.mblog)
+      .map(c => c.mblog);
+
+    // 提取下一页 since_id
+    const nextSinceId = d.data?.cardlistInfo?.since_id || null;
+
+    if (weibos.length > 0) {
+      fetchLogger.debug(`移动端 API 第 ${pageNum} 页成功`, { count: weibos.length, nextSinceId });
+      return { posts: parseMobilePosts(weibos), total: 0, nextSinceId };
     }
 
-    fetchLogger.warn(`API 返回异常数据`, { uid, page, keys: Object.keys(resp.data || {}) });
-    return { posts: [], total: 0 };
-  } catch (err) {
-    fetchLogger.error(`API 请求失败 page=${page}`, { uid, err: err.message, code: err.code });
-    return { posts: [], total: 0, error: err.message };
+    // 如果 cards 存在但没有 type=9，说明已到末尾
+    if (cards.length >= 0 && d.ok === 1) {
+      fetchLogger.info(`移动端 API 第 ${pageNum} 页无数据，已到末尾`);
+      return { posts: [], total: 0, nextSinceId: null };
+    }
   }
+
+  // 移动端失败，回落到 PC 端
+  fetchLogger.warn(`移动端 API 失败（page=${pageNum}），回落到 PC 端`, { status: mobileResult.status });
+
+  const pcUrl = `https://weibo.com/ajax/statuses/mymblog?uid=${uid}&page=${pageNum}&feature=0`;
+  const pcResult = await browserFetch(pcUrl, cookies, `https://weibo.com/u/${uid}`);
+
+  if (!pcResult.ok) {
+    if (pcResult.loginRequired || pcResult.status === 403) {
+      fetchLogger.error('PC 端 API 被反爬拦截，需要重新登录', { uid, status: pcResult.status });
+      return { posts: [], total: 0, loginRequired: true, nextSinceId: null };
+    }
+    fetchLogger.error(`PC 端 API 请求失败 page=${pageNum}`, { uid, status: pcResult.status, error: pcResult.error });
+    return { posts: [], total: 0, error: pcResult.error || `HTTP ${pcResult.status}`, nextSinceId: null };
+  }
+
+  const resp = pcResult.data;
+  if (resp?.data?.list) {
+    fetchLogger.debug(`PC 端 API 第 ${pageNum} 页成功（回落）`, { count: resp.data.list.length });
+    return { posts: parseApiPosts(resp.data.list), total: resp.data.total || 0, nextSinceId: null, usePcFallback: true };
+  }
+
+  if (resp?.errno === 20111 || resp?.msg?.includes('未登录')) {
+    return { posts: [], total: 0, loginRequired: true, nextSinceId: null };
+  }
+
+  fetchLogger.warn(`API 返回异常数据`, { uid, pageNum, keys: Object.keys(resp || {}) });
+  return { posts: [], total: 0, nextSinceId: null };
 }
 
 /**
- * 解析微博 API 帖子数据
+ * 解析移动端微博 API 帖子数据（m.weibo.cn 格式）
+ */
+function parseMobilePosts(list) {
+  return list.map(item => {
+    const pics = [];
+
+    // 移动端图片结构：pic_ids + pic_infos（与 PC 端一致）
+    if (item.pic_ids?.length && item.pic_infos) {
+      for (const picId of item.pic_ids) {
+        const info = item.pic_infos[picId];
+        if (info) {
+          const url = info.largest?.url || info.large?.url || info.original?.url || info.mw2000?.url || info.bmiddle?.url || '';
+          if (url) pics.push(url);
+        }
+      }
+    }
+    // 也可能是 pics 数组格式
+    if (pics.length === 0 && item.pics?.length) {
+      for (const p of item.pics) {
+        const url = p.large?.url || p.url || '';
+        if (url) pics.push(url);
+      }
+    }
+
+    let retweetedData = null;
+    if (item.retweeted_status) {
+      const rt = item.retweeted_status;
+      retweetedData = {
+        user: rt.user?.screen_name || '原博主',
+        text: (rt.text_raw || rt.text || '').replace(/<[^>]+>/g, ''),
+      };
+    }
+
+    return {
+      mid: String(item.id || item.mid || ''),
+      text: (item.text_raw || item.raw_text || item.text || '').replace(/<[^>]+>/g, ''),
+      createdAt: item.created_at || '',
+      pics,
+      reposts: item.reposts_count || 0,
+      comments: item.comments_count || 0,
+      likes: item.attitudes_count || 0,
+      source: (item.source || '').replace(/<[^>]+>/g, ''),
+      isRetweet: !!item.retweeted_status,
+      retweetedData,
+      localPics: [],
+      fetchedAt: Date.now(),
+    };
+  }).filter(p => p.mid);
+}
+
+/**
+ * 解析 PC 端微博 API 帖子数据（weibo.com 格式，作为回落）
  */
 function parseApiPosts(list) {
   return list.map(item => {
@@ -572,17 +956,23 @@ function parseApiPosts(list) {
 }
 
 /**
- * 核心抓取函数（v0.0.2 修复版本）
+ * 核心抓取函数（v0.0.8 版本）
  *
- * 修复点：
- * 1. 不再依赖 Playwright 刷新 Cookie（直接用存储的 Cookie 调 API）
- * 2. 增加 Cookie 有效性检查（调 API 前验证）
- * 3. 全程进度更新（updateProgress）
- * 4. 详细错误日志
+ * v0.0.8 变更：
+ * 1. 支持 AbortSignal 终止信号，可随时中断抓取
+ * 2. Cookie 失效时先保存已抓取数据，再报错（不再丢弃）
+ * 3. 翻页阶段每 5 页保存一次进度（防止中途异常丢失）
+ * 4. 终止时记录断点位置，下次增量可继续
+ * 5. 多订阅可并发执行（通过任务队列）
  */
-async function fetchUserPosts(uid, isIncremental = false) {
+async function fetchUserPosts(uid, isIncremental = false, abortSignal = null) {
   const fLog = createLogger(`Fetch:${uid}`);
   fLog.info(`开始${isIncremental ? '增量' : '全量'}抓取`, { uid });
+
+  // 辅助函数：检查终止信号
+  const checkAbort = () => {
+    if (abortSignal?.aborted) throw new Error('ABORTED');
+  };
 
   const userDir = path.join(USERS_DIR, uid);
   const postsFile = path.join(userDir, 'posts.json');
@@ -605,16 +995,17 @@ async function fetchUserPosts(uid, isIncremental = false) {
     return { success: false, error: '未登录' };
   }
 
-  const cookieStr = cookiesToString(storedCookies);
   fLog.debug('Cookie 基础检查通过', { cookieCount: storedCookies.length });
+  checkAbort();
 
-  // ── 步骤 2：获取用户资料 ──
+  // ── 步骤 2：获取用户资料（使用浏览器上下文）──
   updateProgress(uid, { status: 'fetching', message: '正在获取用户资料...', progress: 5, total: 100 });
+  let profile = null;
   try {
-    const profile = await fetchUserProfile(uid, cookieStr);
+    profile = await fetchUserProfile(uid, storedCookies);
     if (profile) {
       writeJSON(profileFile, { ...profile, uid, updatedAt: new Date().toISOString() });
-      fLog.info('用户资料已更新', { name: profile.name });
+      fLog.info('用户资料已更新', { name: profile.name, statuses: profile.statuses });
 
       // 更新订阅中的昵称/头像
       const subs = readJSON(SUBSCRIPTIONS_FILE, []);
@@ -625,37 +1016,92 @@ async function fetchUserPosts(uid, isIncremental = false) {
         writeJSON(SUBSCRIPTIONS_FILE, subs);
       }
     } else {
-      fLog.warn('获取用户资料失败，可能 Cookie 已失效');
-      // 如果连用户资料都拿不到，检查是否真的登录
-      const verify = await verifyCookieOnline(cookieStr);
-      if (verify.valid === false) {
-        updateProgress(uid, { status: 'error', message: '❌ Cookie 已失效，请重新登录' });
-        return { success: false, error: 'Cookie 已失效' };
-      }
+      fLog.warn('获取用户资料失败，继续尝试抓取帖子...');
     }
   } catch (err) {
+    if (err.message === 'ABORTED') throw err;
     fLog.warn(`获取用户资料异常: ${err.message}`);
   }
 
-  // ── 步骤 3：分页抓取帖子 ──
-  const maxPages = isIncremental ? 2 : 8;
+  checkAbort();
+
+  // ── 步骤 3：分页抓取帖子（v0.0.8：支持终止 + 每5页保存 + Cookie失效时保存）──
+  const POSTS_PER_PAGE = 10;
+  const estimatedTotal = profile?.statuses || 0;
+  const maxPages = isIncremental
+    ? 2
+    : Math.max(20, Math.ceil(estimatedTotal / POSTS_PER_PAGE) + 5);
+  const hardCap = 200;
+  const effectiveMaxPages = Math.min(maxPages, hardCap);
+
+  fLog.info(`翻页计划`, { estimatedTotal, maxPages: effectiveMaxPages, isIncremental });
+
   let allFetchedPosts = [];
   let shouldStop = false;
+  let currentSinceId = null;
+  let usePcFallback = false;
+  let abortedByUser = false; // 用户主动终止
+  let cookieExpired = false; // Cookie 失效
 
-  for (let p = 1; p <= maxPages && !shouldStop; p++) {
-    const progressPct = Math.round(10 + (p / maxPages) * 60);
+  // v0.0.8 辅助函数：将已抓取帖子增量保存到磁盘
+  const saveFetchedPosts = (newPostsBatch) => {
+    const newOnes = newPostsBatch.filter(p => !existingMids.has(p.mid));
+    if (newOnes.length === 0) return;
+    // 合并：新抓取的 + 已有的，去重
+    const merged = [...newOnes, ...existingPosts];
+    // 也加入本轮之前已抓取但还没保存的
+    const allMids = new Set(merged.map(p => p.mid));
+    for (const p of allFetchedPosts) {
+      if (!allMids.has(p.mid)) {
+        merged.unshift(p); // 前面插入（最新的在前）
+      }
+    }
+    // 按时间倒序去重
+    const deduped = [];
+    const seen = new Set();
+    for (const p of merged) {
+      if (!seen.has(p.mid)) {
+        seen.add(p.mid);
+        deduped.push(p);
+      }
+    }
+    writeJSON(postsFile, deduped);
+    cacheInvalidate(uid);
+    fLog.debug(`已增量保存 ${newOnes.length} 条帖子到磁盘`, { total: deduped.length });
+  };
+
+  for (let p = 1; p <= effectiveMaxPages && !shouldStop; p++) {
+    // 检查终止信号
+    if (abortSignal?.aborted) {
+      fLog.info(`用户终止抓取，已获取 ${allFetchedPosts.length} 条`);
+      abortedByUser = true;
+      break;
+    }
+
+    const progressPct = Math.round(10 + (p / effectiveMaxPages) * 60);
     updateProgress(uid, {
       status: 'fetching',
-      message: `正在获取第 ${p}/${maxPages} 页...`,
+      message: `正在获取第 ${p}/${effectiveMaxPages} 页${currentSinceId ? ' (since_id)' : ''}...`,
       progress: progressPct,
       total: 100,
     });
 
-    const result = await fetchWeiboApiPosts(uid, cookieStr, p);
+    const result = usePcFallback
+      ? await fetchWeiboApiPosts(uid, storedCookies, p, null)
+      : await fetchWeiboApiPosts(uid, storedCookies, p, currentSinceId);
 
+    // v0.0.8 关键修复：Cookie 失效时，先保存已抓取数据再报错
     if (result.loginRequired) {
-      updateProgress(uid, { status: 'error', message: '❌ 登录已过期，请重新登录' });
-      return { success: false, error: '登录已过期' };
+      cookieExpired = true;
+      fLog.warn(`Cookie 失效，已抓取 ${allFetchedPosts.length} 条，先保存再报错`);
+      // 先保存已有的帖子数据（不下载图片，先保帖子元数据）
+      saveFetchedPosts(allFetchedPosts);
+      updateProgress(uid, {
+        status: 'error',
+        message: `❌ Cookie 已失效，已保存 ${allFetchedPosts.length} 条帖子元数据，图片可后续增量下载。请重新登录后再增量抓取。`,
+        lastFetch: null,
+      });
+      return { success: false, error: 'Cookie已失效', savedPosts: allFetchedPosts.length };
     }
 
     if (result.error && result.posts.length === 0) {
@@ -672,8 +1118,22 @@ async function fetchUserPosts(uid, isIncremental = false) {
       break;
     }
 
+    if (result.usePcFallback) usePcFallback = true;
+
+    if (result.nextSinceId) {
+      currentSinceId = result.nextSinceId;
+    } else if (!usePcFallback) {
+      fLog.info(`移动端 since_id 为空，翻页结束（已获取 ${allFetchedPosts.length + result.posts.length} 条）`);
+    }
+
     allFetchedPosts = allFetchedPosts.concat(result.posts);
     fLog.debug(`第 ${p} 页获取 ${result.posts.length} 条`, { total: allFetchedPosts.length });
+
+    // v0.0.8：每 5 页保存一次进度到磁盘（防止翻页阶段异常丢数据）
+    if (p % 5 === 0) {
+      saveFetchedPosts(allFetchedPosts);
+      fLog.info(`翻页进度保存（每5页）`, { page: p, total: allFetchedPosts.length });
+    }
 
     // 增量模式：遇到重复内容停止
     if (isIncremental) {
@@ -684,68 +1144,277 @@ async function fetchUserPosts(uid, isIncremental = false) {
       }
     }
 
-    if (p < maxPages && !shouldStop) await randomDelay(800, 1800);
+    if (!result.nextSinceId && !usePcFallback) {
+      fLog.info('移动端翻页标识耗尽，完成抓取');
+      break;
+    }
+
+    if (p < effectiveMaxPages && !shouldStop) await randomDelay(RATE_LIMIT.PAGE_DELAY_MIN, RATE_LIMIT.PAGE_DELAY_MAX);
   }
 
-  // ── 步骤 4：筛选新帖子 ──
-  const newPosts = allFetchedPosts.filter(p => !existingMids.has(p.mid));
-  fLog.info(`抓取完成`, { total: allFetchedPosts.length, new: newPosts.length });
+  // 终止后保存断点信息
+  if (abortedByUser) {
+    saveFetchedPosts(allFetchedPosts);
+    const newPosts = allFetchedPosts.filter(p => !existingMids.has(p.mid));
+    fLog.info(`终止后保存 ${newPosts.length} 条新帖子（未下载图片）`, { total: allFetchedPosts.length });
 
-  if (newPosts.length === 0 && !isIncremental && allFetchedPosts.length === 0) {
+    // 保存断点信息
+    const checkpointFile = path.join(userDir, 'checkpoint.json');
+    writeJSON(checkpointFile, {
+      uid,
+      abortedAt: new Date().toISOString(),
+      lastSinceId: currentSinceId,
+      usePcFallback,
+      fetchedPages: effectiveMaxPages,
+      fetchedPostCount: allFetchedPosts.length,
+      existingPostCount: existingPosts.length,
+    });
+
+    updateProgress(uid, {
+      status: 'paused',
+      message: `⏸ 已终止抓取，保存了 ${newPosts.length} 条新帖子（图片未下载）。可再次增量抓取继续。`,
+      progress: 70,
+      total: 100,
+      lastFetch: new Date().toISOString(),
+    });
+
+    return { success: true, aborted: true, newCount: newPosts.length, total: allFetchedPosts.length + existingPosts.length };
+  }
+
+  // ── 步骤 4：筛选新帖子 + 找出缺图片的已有帖子（v0.1.0：补全逻辑）──
+  const newPosts = allFetchedPosts.filter(p => !existingMids.has(p.mid));
+  
+  // v0.1.0：找出已有帖子中"有图片但未下载"的（pics 非空但 localPics 为空/缺失）
+  // 这些帖子可能是之前 Cookie 失效时只保存了元数据、图片没下载的情况
+  const incompletePosts = existingPosts.filter(p => 
+    p.pics && p.pics.length > 0 && (!p.localPics || p.localPics.length === 0)
+  );
+  
+  fLog.info(`抓取完成`, { total: allFetchedPosts.length, new: newPosts.length, existing: existingPosts.length, incomplete: incompletePosts.length });
+
+  // v0.1.0：构建已有帖子的 mid -> localPics 映射，确保合并时不丢失已下载的图片引用
+  const existingLocalPicsMap = new Map();
+  for (const p of existingPosts) {
+    if (p.localPics && p.localPics.length > 0) {
+      existingLocalPicsMap.set(p.mid, p.localPics);
+    }
+  }
+
+  // v0.1.0：构建已有图片文件名集合（用于跳过已下载的图片）
+  const existingImageFiles = new Set();
+  if (fs.existsSync(imagesDir)) {
+    try {
+      const files = fs.readdirSync(imagesDir);
+      for (const f of files) {
+        const stat = fs.statSync(path.join(imagesDir, f));
+        if (stat.isFile() && stat.size > 0) {
+          existingImageFiles.add(f);
+        }
+      }
+      fLog.info(`本地已有 ${existingImageFiles.size} 张图片`, { uid });
+    } catch (_) {}
+  }
+
+  if (newPosts.length === 0 && incompletePosts.length === 0 && !isIncremental && allFetchedPosts.length === 0) {
     updateProgress(uid, { status: 'error', message: '⚠️ 未获取到任何帖子，请检查 Cookie 是否有效' });
     return { success: false, error: '未获取到帖子' };
   }
 
-  // ── 步骤 5：下载图片 ──
-  if (newPosts.length > 0) {
-    const totalImgs = newPosts.reduce((sum, p) => sum + p.pics.length, 0);
-    let downloadedImgs = 0;
-
-    fLog.info(`开始下载图片`, { posts: newPosts.length, images: totalImgs });
+  if (newPosts.length === 0 && incompletePosts.length === 0) {
+    // 没有新帖子也没有缺图片的帖子
     updateProgress(uid, {
-      status: 'fetching',
-      message: `正在下载图片 (0/${totalImgs})...`,
-      progress: 70,
+      status: 'success',
+      message: `✅ 无新帖子，共 ${existingPosts.length} 条`,
+      progress: 100,
       total: 100,
+      lastFetch: new Date().toISOString(),
     });
+    return { success: true, newCount: 0, total: existingPosts.length };
+  }
 
-    for (const post of newPosts) {
-      const localPics = [];
+  // ── 步骤 5：下载图片（v0.1.0：补全新帖子 + 缺图片的已有帖子）──
+  const cookieStr = cookiesToString(storedCookies);
+  
+  // v0.1.0：合并新帖子和缺图片的已有帖子，统一下载
+  const postsNeedImages = [...newPosts, ...incompletePosts];
+  
+  if (postsNeedImages.length > 0) {
+    // v0.1.0：先扫描需要下载的图片数量（排除已有的）
+    let totalImgs = 0;
+    let skippedImgs = 0;
+    for (const post of postsNeedImages) {
       for (let i = 0; i < post.pics.length; i++) {
         const picUrl = post.pics[i];
         const rawExt = picUrl.split('?')[0].split('.').pop() || 'jpg';
         const ext = rawExt.slice(0, 4).replace(/[^a-zA-Z0-9]/g, '') || 'jpg';
         const filename = `${post.mid}_${i}.${ext}`;
-        const destPath = path.join(imagesDir, filename);
-
-        if (!fs.existsSync(destPath)) {
-          const ok = await downloadImage(picUrl, destPath, cookieStr);
-          if (ok) localPics.push(filename);
-          await randomDelay(200, 600);
+        if (existingImageFiles.has(filename)) {
+          skippedImgs++;
         } else {
-          localPics.push(filename);
-        }
-
-        downloadedImgs++;
-        if (totalImgs > 0) {
-          const imgPct = Math.round(70 + (downloadedImgs / totalImgs) * 25);
-          updateProgress(uid, {
-            status: 'fetching',
-            message: `正在下载图片 (${downloadedImgs}/${totalImgs})...`,
-            progress: imgPct,
-            total: 100,
-          });
+          totalImgs++;
         }
       }
-      post.localPics = localPics;
+    }
+
+    let downloadedImgs = 0;
+
+    fLog.info(`开始下载图片`, { 
+      newPosts: newPosts.length, 
+      incompletePosts: incompletePosts.length, 
+      imagesToDownload: totalImgs, 
+      imagesSkipped: skippedImgs 
+    });
+
+    if (totalImgs === 0 && skippedImgs > 0) {
+      // 所有图片都已存在，不需要下载，只需补全 localPics 引用
+      fLog.info(`所有 ${skippedImgs} 张图片已存在，跳过下载，补全 localPics 引用`);
+      for (const post of postsNeedImages) {
+        const localPics = [];
+        for (let i = 0; i < post.pics.length; i++) {
+          const picUrl = post.pics[i];
+          const rawExt = picUrl.split('?')[0].split('.').pop() || 'jpg';
+          const ext = rawExt.slice(0, 4).replace(/[^a-zA-Z0-9]/g, '') || 'jpg';
+          const filename = `${post.mid}_${i}.${ext}`;
+          localPics.push(filename);
+        }
+        post.localPics = localPics;
+      }
+    } else {
+      updateProgress(uid, {
+        status: 'fetching',
+        message: `正在下载图片 (0/${totalImgs})，${skippedImgs > 0 ? `已跳过 ${skippedImgs} 张` : ''}${incompletePosts.length > 0 ? `，补全 ${incompletePosts.length} 条缺图帖子` : ''}...`,
+        progress: 70,
+        total: 100,
+      });
+
+      for (let postIdx = 0; postIdx < postsNeedImages.length; postIdx++) {
+        // 检查终止信号（图片下载循环中）
+        if (abortSignal?.aborted) {
+          fLog.info(`用户终止图片下载，已处理 ${postIdx}/${postsNeedImages.length} 个帖子`);
+          // 保存已完成的
+          const savedPosts = [...postsNeedImages.slice(0, postIdx).filter(p => !existingMids.has(p.mid)), ...existingPosts];
+          writeJSON(postsFile, savedPosts);
+          cacheInvalidate(uid);
+
+          const checkpointFile = path.join(userDir, 'checkpoint.json');
+          writeJSON(checkpointFile, {
+            uid,
+            abortedAt: new Date().toISOString(),
+            downloadedPostIdx: postIdx,
+            totalPostsNeedImages: postsNeedImages.length,
+            remainingImgs: totalImgs - downloadedImgs,
+          });
+
+          updateProgress(uid, {
+            status: 'paused',
+            message: `⏸ 已终止，下载了 ${postIdx}/${postsNeedImages.length} 个帖子的图片。可再次增量抓取继续。`,
+            progress: 70 + Math.round((downloadedImgs / totalImgs) * 25),
+            total: 100,
+            lastFetch: new Date().toISOString(),
+          });
+
+          return { success: true, aborted: true, newCount: newPosts.length, total: savedPosts.length };
+        }
+
+        const post = postsNeedImages[postIdx];
+        const localPics = [];
+        for (let i = 0; i < post.pics.length; i++) {
+          const picUrl = post.pics[i];
+          const rawExt = picUrl.split('?')[0].split('.').pop() || 'jpg';
+          const ext = rawExt.slice(0, 4).replace(/[^a-zA-Z0-9]/g, '') || 'jpg';
+          const filename = `${post.mid}_${i}.${ext}`;
+
+          // v0.1.0：如果本地已有该图片文件，跳过下载
+          if (existingImageFiles.has(filename)) {
+            localPics.push(filename);
+            fLog.debug(`图片已存在，跳过下载: ${filename}`);
+            continue;
+          }
+
+          const destPath = path.join(imagesDir, filename);
+          const ok = await downloadImage(picUrl, destPath, cookieStr);
+          if (ok) {
+            localPics.push(filename);
+            existingImageFiles.add(filename); // 记录已下载，后续帖子同文件名也会跳过
+          }
+
+          downloadedImgs++;
+          if (totalImgs > 0) {
+            const imgPct = Math.round(70 + (downloadedImgs / totalImgs) * 25);
+            updateProgress(uid, {
+              status: 'fetching',
+              message: `正在下载图片 (${downloadedImgs}/${totalImgs})${skippedImgs > 0 ? `，已跳过 ${skippedImgs}` : ''}${incompletePosts.length > 0 ? `，补全 ${incompletePosts.length} 条缺图帖子` : ''}...`,
+              progress: imgPct,
+              total: 100,
+            });
+          }
+
+          // 图片间延迟（只在真正下载时才延迟，跳过的不延迟）
+          if (!(postIdx === postsNeedImages.length - 1 && i === post.pics.length - 1)) {
+            await randomDelay(RATE_LIMIT.IMAGE_DELAY_MIN, RATE_LIMIT.IMAGE_DELAY_MAX);
+          }
+        }
+        post.localPics = localPics;
+
+        // 每下载完一个帖子的图片，立即保存进度到磁盘
+        // v0.1.0：合并时用 existingMids 区分新帖子和已有帖子
+        const allNewSoFar = postsNeedImages.slice(0, postIdx + 1).filter(p => !existingMids.has(p.mid));
+        const allExistingUpdated = existingPosts.map(ep => {
+          // 如果已有帖子被补全了图片，用更新后的版本
+          const updated = postsNeedImages.slice(0, postIdx + 1).find(p => p.mid === ep.mid);
+          return updated || ep;
+        });
+        const savedPosts = [...allNewSoFar, ...allExistingUpdated.filter(ep => !allNewSoFar.find(np => np.mid === ep.mid))];
+        writeJSON(postsFile, savedPosts);
+        cacheInvalidate(uid);
+
+        fLog.debug(`已保存第 ${postIdx + 1}/${postsNeedImages.length} 个帖子的图片进度`, { mid: post.mid });
+      }
     }
   }
 
-  // ── 步骤 6：合并保存 ──
+  // ── 步骤 6：最终确认保存（v0.2.0：全量模式覆盖更新 + 补全已有帖子的 localPics）──
   updateProgress(uid, { status: 'fetching', message: '正在保存数据...', progress: 97, total: 100 });
 
-  const allPosts = [...newPosts, ...existingPosts];
+  // v0.2.0：合并逻辑
+  // 全量模式（incremental=false）：以 mid 为 key，新数据覆盖旧数据
+  // 增量模式（incremental=true）：新帖子直接加入，已有帖子如果 localPics 被更新了也用新版本
+  let allPosts;
+  if (!isIncremental) {
+    // 全量模式：新数据覆盖旧数据
+    const newMids = new Set(newPosts.map(p => p.mid));
+    // 保留旧数据中未被新数据覆盖的帖子
+    const keptOld = existingPosts.filter(ep => !newMids.has(ep.mid));
+    // 对于被覆盖的帖子，如果旧帖子有 localPics 而新帖子没有，保留旧 localPics
+    for (const np of newPosts) {
+      if (!np.localPics || np.localPics.length === 0) {
+        const oldPics = existingLocalPicsMap.get(np.mid);
+        if (oldPics && oldPics.length > 0) {
+          np.localPics = oldPics;
+        }
+      }
+    }
+    allPosts = [...newPosts, ...keptOld];
+  } else {
+    // 增量模式：保持 v0.1.0 逻辑
+    allPosts = [...newPosts];
+    const newMids = new Set(newPosts.map(p => p.mid));
+    for (const existingPost of existingPosts) {
+      if (!newMids.has(existingPost.mid)) {
+        const updated = incompletePosts.find(p => p.mid === existingPost.mid);
+        allPosts.push(updated || existingPost);
+      }
+    }
+  }
+
   writeJSON(postsFile, allPosts);
+  cacheInvalidate(uid);
+
+  // 清除断点文件（完成抓取后不需要了）
+  const checkpointFile = path.join(userDir, 'checkpoint.json');
+  if (fs.existsSync(checkpointFile)) {
+    try { fs.unlinkSync(checkpointFile); } catch (_) {}
+  }
 
   // 更新订阅 lastFetch & postCount
   const subs = readJSON(SUBSCRIPTIONS_FILE, []);
@@ -756,9 +1425,10 @@ async function fetchUserPosts(uid, isIncremental = false) {
     writeJSON(SUBSCRIPTIONS_FILE, subs);
   }
 
+  const incompleteFixed = incompletePosts.length;
   const summary = isIncremental
-    ? `✅ 增量完成，新增 ${newPosts.length} 条`
-    : `✅ 全量完成，共 ${allPosts.length} 条（新增 ${newPosts.length}）`;
+    ? `✅ 增量完成，新增 ${newPosts.length} 条${incompleteFixed > 0 ? `，补全 ${incompleteFixed} 条缺图帖子` : ''}`
+    : `✅ 完成，共 ${allPosts.length} 条（新增 ${newPosts.length}${incompleteFixed > 0 ? `，补全 ${incompleteFixed} 条缺图` : ''}）`;
 
   updateProgress(uid, {
     status: 'success',
@@ -768,8 +1438,8 @@ async function fetchUserPosts(uid, isIncremental = false) {
     lastFetch: new Date().toISOString(),
   });
 
-  fLog.info(summary, { uid, newPosts: newPosts.length, total: allPosts.length });
-  return { success: true, newCount: newPosts.length, total: allPosts.length };
+  fLog.info(summary, { uid, newPosts: newPosts.length, incompleteFixed, total: allPosts.length });
+  return { success: true, newCount: newPosts.length, total: allPosts.length, incompleteFixed };
 }
 
 // ─── 定时调度 ──────────────────────────────────────────────────────────────────
@@ -781,9 +1451,8 @@ function startScheduler(uid, intervalMinutes) {
   const ms = Math.max(intervalMinutes, 5) * 60 * 1000;
   const timer = setInterval(async () => {
     schedLogger.info(`触发定时增量抓取`, { uid, intervalMinutes });
-    fetchUserPosts(uid, true).catch(err =>
-      schedLogger.error(`定时抓取失败`, { uid, err: err.message })
-    );
+    // v0.0.8：通过任务队列，支持并发
+    enqueueFetch(uid, true);
   }, ms);
   schedulers.set(uid, timer);
   schedLogger.info(`调度器已启动`, { uid, intervalMinutes });
@@ -895,21 +1564,85 @@ app.post('/api/auth/login', async (req, res) => {
     return res.json({ success: true, message: '已登录，无需重新登录', alreadyLoggedIn: true });
   }
 
+  // 如果已有待确认的登录窗口，直接返回
+  if (pendingLoginContext) {
+    return res.json({ success: true, message: '登录窗口已打开，请在浏览器中完成登录后点击「我已完成登录」', pending: true });
+  }
+
   loginLogger.info('收到登录请求，打开浏览器...');
   res.json({ success: true, message: '已打开微博登录窗口，请在弹出的浏览器中完成登录', pending: true });
 
-  openLoginWindow()
-    .then(result => {
-      isLoggedIn = result.success;
-      loginLogger.info('登录流程完成', { success: result.success, message: result.message });
+  openLoginWindow().catch(err => loginLogger.error(`打开登录窗口异常: ${err.message}`));
+});
 
-      // 通过 SSE 推送登录结果
-      const payload = `data: ${JSON.stringify({ type: 'loginResult', ...result })}\n\n`;
-      for (const client of sseClients) {
-        try { client.write(payload); } catch (_) {}
-      }
-    })
-    .catch(err => loginLogger.error(`登录异常: ${err.message}`));
+/**
+ * POST /api/auth/confirm-login
+ * 用户在前端点击「我已完成登录」后，服务端从浏览器上下文采集 Cookie 并验证
+ */
+app.post('/api/auth/confirm-login', async (req, res) => {
+  if (!pendingLoginContext) {
+    return res.status(400).json({ success: false, error: '没有待确认的登录窗口，请先点击「打开微博登录窗口」' });
+  }
+
+  loginLogger.info('用户手动确认登录，采集 Cookie...');
+
+  try {
+    const finalCookies = await pendingLoginContext.cookies([
+      'https://weibo.com',
+      'https://www.weibo.com',
+      'https://m.weibo.cn',
+      'https://passport.weibo.com',
+    ]);
+
+    const subCookie = finalCookies.find(c => c.name === 'SUB');
+    if (!subCookie) {
+      loginLogger.warn('确认时未找到 SUB Cookie，用户可能还未完成登录');
+      return res.json({
+        success: false,
+        error: '未检测到登录 Cookie（SUB），请确认已在浏览器中完成登录并重试',
+        cookieCount: finalCookies.length,
+      });
+    }
+
+    saveCookies(finalCookies);
+    loginLogger.info(`Cookie 已保存 ${finalCookies.length} 条，正在验证...`);
+
+    // 在线验证
+    const verifyResult = await verifyCookieOnline(finalCookies);
+
+    if (verifyResult.valid === true) {
+      isLoggedIn = true;
+      loginLogger.info('✅ 登录验证成功', { uid: verifyResult.uid, name: verifyResult.name });
+
+      // SSE 推送登录结果
+      const ssePayload = `data: ${JSON.stringify({
+        type: 'loginResult', success: true,
+        message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`,
+        userInfo: verifyResult,
+      })}\n\n`;
+      for (const client of sseClients) { try { client.write(ssePayload); } catch (_) {} }
+
+      await closePendingLogin();
+      return res.json({ success: true, message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`, userInfo: verifyResult });
+
+    } else if (verifyResult.valid === false) {
+      loginLogger.warn('Cookie 在线验证失败，但已保存', { error: verifyResult.error });
+      isLoggedIn = true; // Cookie 已保存，乐观接受
+      await closePendingLogin();
+      return res.json({ success: true, message: `Cookie 已保存，但验证失败（${verifyResult.error}）`, userInfo: {} });
+
+    } else {
+      // valid === null：网络异常，降级接受
+      loginLogger.warn('在线验证网络失败，降级接受');
+      isLoggedIn = true;
+      await closePendingLogin();
+      return res.json({ success: true, message: 'Cookie 已保存（验证服务暂时不可用）', userInfo: {} });
+    }
+
+  } catch (err) {
+    loginLogger.error(`确认登录异常: ${err.message}`);
+    return res.status(500).json({ success: false, error: `处理异常: ${err.message}` });
+  }
 });
 
 // POST /api/auth/verify - 验证当前 Cookie 是否有效
@@ -966,10 +1699,30 @@ app.post('/api/auth/set-cookie', async (req, res) => {
 // GET /api/subscriptions
 app.get('/api/subscriptions', (req, res) => {
   const subs = readJSON(SUBSCRIPTIONS_FILE, []);
-  const result = subs.map(sub => ({
-    ...sub,
-    fetchStatus: fetchStatus.get(sub.uid) || { status: 'idle', message: '', lastFetch: sub.lastFetch || null },
-  }));
+  let needsWrite = false;
+  const result = subs.map(sub => {
+    // v0.1.0：实时统计帖子数量，而不是依赖缓存的 postCount
+    const postsFile = path.join(USERS_DIR, sub.uid, 'posts.json');
+    let actualPostCount = sub.postCount || 0;
+    if (fs.existsSync(postsFile)) {
+      try {
+        const posts = readJSON(postsFile, []);
+        actualPostCount = posts.length;
+      } catch (_) {}
+    }
+    // 如果实际数量与缓存不一致，更新缓存
+    if (sub.postCount !== actualPostCount) {
+      sub.postCount = actualPostCount;
+      needsWrite = true;
+    }
+    return {
+      ...sub,
+      postCount: actualPostCount,
+      fetchStatus: fetchStatus.get(sub.uid) || { status: 'idle', message: '', lastFetch: sub.lastFetch || null },
+    };
+  });
+  // 回写 subscriptions.json（同步 postCount）
+  if (needsWrite) writeJSON(SUBSCRIPTIONS_FILE, subs);
   res.json({ success: true, data: result });
 });
 
@@ -1000,7 +1753,7 @@ app.post('/api/subscriptions', async (req, res) => {
   const cookies = loadCookies();
   if (checkLoginFromCookies(cookies)) {
     try {
-      const profile = await fetchUserProfile(uid, cookiesToString(cookies));
+      const profile = await fetchUserProfile(uid, cookies);
       if (profile) {
         newSub.name = profile.name || newSub.name;
         newSub.avatar = profile.avatar || '';
@@ -1027,13 +1780,15 @@ app.post('/api/subscriptions', async (req, res) => {
 
   startScheduler(uid, newSub.intervalMinutes);
 
-  res.json({ success: true, data: newSub, message: `已添加订阅 ${newSub.name}（${uid}），首次全量抓取将立即开始` });
+  // v0.1.0：判断首次抓取模式 — 有数据则增量，无数据则全量
+  const existingPosts = readJSON(path.join(userDir, 'posts.json'), []);
+  const hasCheckpoint = fs.existsSync(path.join(userDir, 'checkpoint.json'));
+  const isFirstFull = existingPosts.length === 0 && !hasCheckpoint;
 
-  // 异步触发首次全量抓取
+  res.json({ success: true, data: newSub, message: `已添加订阅 ${newSub.name}（${uid}），${isFirstFull ? '首次全量' : '增量'}抓取将立即开始` });
+
   setTimeout(() => {
-    fetchUserPosts(uid, false).catch(err =>
-      logger.error(`首次全量抓取失败`, { uid, err: err.message })
-    );
+    enqueueFetch(uid, !isFirstFull);
   }, 500);
 });
 
@@ -1057,7 +1812,13 @@ app.get('/api/posts/:uid', (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
   const pageSize = Math.min(parseInt(req.query.pageSize) || 20, 50);
 
-  const posts = readJSON(path.join(USERS_DIR, uid, 'posts.json'), []);
+  // 先查内存缓存，命中则跳过磁盘读取
+  let posts = cacheGet(uid);
+  if (!posts) {
+    posts = readJSON(path.join(USERS_DIR, uid, 'posts.json'), []);
+    cacheSet(uid, posts);
+  }
+
   const profile = readJSON(path.join(USERS_DIR, uid, 'profile.json'), { uid, name: `用户 ${uid}`, avatar: '' });
 
   const total = posts.length;
@@ -1074,10 +1835,133 @@ app.get('/api/posts/:uid', (req, res) => {
   });
 });
 
+// GET /api/search — v0.2.0 搜索 API
+app.get('/api/search', (req, res) => {
+  const searchLogger = createLogger('Search');
+  const keyword = (req.query.keyword || '').trim();
+  if (!keyword) {
+    return res.status(400).json({ success: false, error: 'keyword 参数必填' });
+  }
+
+  const scope = req.query.scope || 'all';
+  const startDateStr = req.query.startDate || '';
+  const endDateStr = req.query.endDate || '';
+  const picFilter = req.query.picFilter || 'all';
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const pageSize = Math.min(parseInt(req.query.pageSize) || 20, 50);
+
+  // 解析时间范围
+  let startDate = null;
+  let endDate = null;
+  if (startDateStr) {
+    try { startDate = new Date(startDateStr); if (isNaN(startDate.getTime())) startDate = null; } catch (_) { startDate = null; }
+  }
+  if (endDateStr) {
+    try { endDate = new Date(endDateStr); endDate.setHours(23, 59, 59, 999); if (isNaN(endDate.getTime())) endDate = null; } catch (_) { endDate = null; }
+  }
+
+  // 解析 scope 确定要搜索的 uid 列表
+  const subs = readJSON(SUBSCRIPTIONS_FILE, []);
+  let targetUids = [];
+  if (scope === 'all') {
+    targetUids = subs.map(s => s.uid);
+  } else {
+    // 逗号分隔的 uid 列表
+    targetUids = scope.split(',').map(u => u.trim()).filter(Boolean);
+  }
+
+  if (targetUids.length === 0) {
+    return res.json({ success: true, data: { posts: [], pagination: { page, pageSize, total: 0, totalPages: 0 }, keyword } });
+  }
+
+  // 构建订阅信息的 uid -> { name, avatar } 映射
+  const subMap = new Map();
+  for (const sub of subs) {
+    subMap.set(sub.uid, { name: sub.name || `用户 ${sub.uid}`, avatar: sub.avatar || '' });
+  }
+
+  const keywordLower = keyword.toLowerCase();
+  const matchedPosts = [];
+
+  for (const uid of targetUids) {
+    // 使用缓存读取帖子
+    let posts = cacheGet(uid);
+    if (!posts) {
+      posts = readJSON(path.join(USERS_DIR, uid, 'posts.json'), []);
+      cacheSet(uid, posts);
+    }
+
+    // 获取用户信息
+    const profile = readJSON(path.join(USERS_DIR, uid, 'profile.json'), null);
+    const userName = profile?.name || subMap.get(uid)?.name || `用户 ${uid}`;
+    const userAvatar = profile?.avatar || subMap.get(uid)?.avatar || '';
+
+    for (const post of posts) {
+      // 大小写不敏感的 includes 匹配
+      const textLower = (post.text || '').toLowerCase();
+      if (!textLower.includes(keywordLower)) continue;
+
+      // 时间范围筛选
+      if (startDate || endDate) {
+        try {
+          const postDate = new Date(post.createdAt);
+          if (isNaN(postDate.getTime())) continue; // 解析失败则跳过日期筛选（即此帖子不匹配时间条件）
+          if (startDate && postDate < startDate) continue;
+          if (endDate && postDate > endDate) continue;
+        } catch (_) {
+          continue; // 解析异常则跳过
+        }
+      }
+
+      // 图片筛选
+      if (picFilter === 'withPics') {
+        if (!post.pics || post.pics.length === 0) continue;
+      } else if (picFilter === 'noPics') {
+        if (post.pics && post.pics.length > 0) continue;
+      }
+
+      // 匹配成功，附加来源用户信息
+      matchedPosts.push({
+        ...post,
+        uid,
+        userName,
+        userAvatar,
+      });
+    }
+  }
+
+  // 按时间倒序排列
+  matchedPosts.sort((a, b) => {
+    const dateA = new Date(a.createdAt);
+    const dateB = new Date(b.createdAt);
+    const timeA = isNaN(dateA.getTime()) ? 0 : dateA.getTime();
+    const timeB = isNaN(dateB.getTime()) ? 0 : dateB.getTime();
+    return timeB - timeA;
+  });
+
+  // 分页
+  const total = matchedPosts.length;
+  const totalPages = Math.ceil(total / pageSize) || 1;
+  const startIdx = (page - 1) * pageSize;
+  const pagedPosts = matchedPosts.slice(startIdx, startIdx + pageSize);
+
+  searchLogger.info(`搜索完成`, { keyword, scope, picFilter, total, page, pageSize });
+
+  res.json({
+    success: true,
+    data: {
+      posts: pagedPosts,
+      pagination: { page, pageSize, total, totalPages },
+      keyword,
+    },
+  });
+});
+
 // POST /api/fetch/:uid
 app.post('/api/fetch/:uid', (req, res) => {
   const { uid } = req.params;
-  const incremental = req.body.incremental === true || req.body.incremental === 'true';
+  let incremental = req.body.incremental === true || req.body.incremental === 'true';
+  const force = req.body.force === true;
 
   const subs = readJSON(SUBSCRIPTIONS_FILE, []);
   if (!subs.find(s => s.uid === uid)) {
@@ -1089,16 +1973,81 @@ app.post('/api/fetch/:uid', (req, res) => {
     return res.status(409).json({ success: false, error: '正在抓取中，请稍后', currentMessage: current.message });
   }
 
+  // v0.2.0：force=true 时清除 checkpoint.json（强制从头开始）
+  if (force && !incremental) {
+    const userDir = path.join(USERS_DIR, uid);
+    const checkpointFile = path.join(userDir, 'checkpoint.json');
+    if (fs.existsSync(checkpointFile)) {
+      try { fs.unlinkSync(checkpointFile); } catch (_) {}
+      logger.info(`force=true，已删除断点文件`, { uid });
+    }
+  }
+
+  // v0.2.0：全量抓取只允许首次（无数据时），有数据一律改为增量 — 但 force=true 时跳过此逻辑
+  if (!incremental && !force) {
+    const userDir = path.join(USERS_DIR, uid);
+    const postsFile = path.join(userDir, 'posts.json');
+    if (fs.existsSync(postsFile)) {
+      try {
+        const existing = readJSON(postsFile, []);
+        if (existing.length > 0) {
+          // 已有数据，自动改为增量
+          incremental = true;
+          logger.info(`已有 ${existing.length} 条帖子，全量→增量`, { uid });
+        }
+      } catch (_) {}
+    }
+    // 同时检查是否有断点需要恢复
+    const checkpointFile = path.join(userDir, 'checkpoint.json');
+    if (fs.existsSync(checkpointFile)) {
+      incremental = true; // 有断点用增量恢复
+      logger.info(`发现断点文件，使用增量恢复`, { uid });
+    }
+  }
+
+  // v0.2.0：force=true 时推送 fullFetchMode 标识
+  const fullFetchMode = force && !incremental;
+
+  // v0.0.8：通过任务队列启动（支持并发）
+  const result = enqueueFetch(uid, incremental);
+  if (!result.queued) {
+    return res.status(409).json({ success: false, error: result.reason });
+  }
+
   const mode = incremental ? '增量' : '全量';
-  logger.info(`手动触发${mode}抓取`, { uid });
-  res.json({ success: true, message: `已触发${mode}抓取，进度请关注左侧状态` });
+  logger.info(`手动触发${mode}抓取`, { uid, force, fullFetchMode });
+  res.json({ success: true, message: `已触发${mode}抓取，进度请关注左侧状态`, autoIncremental: !req.body.incremental && incremental, fullFetchMode });
 
-  // 立即更新状态（避免前端看到旧的 idle 状态）
-  updateProgress(uid, { status: 'fetching', message: `${mode}抓取启动中...`, progress: 0, total: 100 });
+  updateProgress(uid, { status: 'fetching', message: `${mode}抓取启动中...`, progress: 0, total: 100, fullFetchMode: fullFetchMode || undefined });
+});
 
-  fetchUserPosts(uid, incremental).catch(err => {
-    logger.error(`${mode}抓取异常`, { uid, err: err.message });
-    updateProgress(uid, { status: 'error', message: `❌ 抓取异常: ${err.message}` });
+// POST /api/fetch/:uid/abort — v0.0.8：终止抓取
+app.post('/api/fetch/:uid/abort', (req, res) => {
+  const { uid } = req.params;
+  const aborted = abortFetch(uid);
+  if (aborted) {
+    logger.info(`终止抓取请求已发送`, { uid });
+    res.json({ success: true, message: '终止信号已发送，正在保存已抓取数据...' });
+  } else {
+    res.json({ success: false, error: '没有正在进行的抓取任务' });
+  }
+});
+
+// GET /api/fetch/queue — v0.0.8：查看任务队列
+app.get('/api/fetch/queue', (req, res) => {
+  const active = [];
+  for (const [uid, ac] of activeFetches.entries()) {
+    active.push({ uid, status: fetchStatus.get(uid)?.status || 'fetching' });
+  }
+  res.json({
+    success: true,
+    data: {
+      activeCount: activeFetches.size,
+      maxConcurrent: MAX_CONCURRENT_FETCHES,
+      queueLength: fetchQueue.length,
+      active,
+      queue: fetchQueue.map(t => ({ uid: t.uid, isIncremental: t.isIncremental })),
+    },
   });
 });
 
@@ -1114,6 +2063,30 @@ app.get('/api/images/:uid/:filename', (req, res) => {
   const { uid, filename } = req.params;
   const imgPath = path.join(USERS_DIR, uid, 'images', path.basename(filename));
   if (!fs.existsSync(imgPath)) return res.status(404).send('图片不存在');
+
+  // v0.2.0：支持 download 参数，触发浏览器下载
+  if (req.query.download === 'true') {
+    // 获取用户名
+    const subs = readJSON(SUBSCRIPTIONS_FILE, []);
+    const sub = subs.find(s => s.uid === uid);
+    const userName = sub?.name || uid;
+
+    // 从文件名中提取 mid（文件名格式：{mid}_{序号}.{ext}）
+    const baseName = path.basename(filename);
+    const midMatch = baseName.match(/^(\d+)_/);
+    const mid = midMatch ? midMatch[1] : '';
+
+    // 生成下载文件名：{用户名}_{mid}_{序号}.{ext}
+    const ext = path.extname(baseName);
+    const seqMatch = baseName.match(/_(\d+)\./);
+    const seq = seqMatch ? seqMatch[1] : '0';
+    const downloadName = mid
+      ? `${userName}_${mid}_${seq}${ext}`
+      : `${userName}_${baseName}`;
+
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(downloadName)}"`);
+  }
+
   res.sendFile(imgPath);
 });
 
@@ -1128,12 +2101,14 @@ app.get('/api/profile/:uid', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
-    version: '0.0.2',
+    version: '0.2.0',
     uptime: Math.floor(process.uptime()),
     loggedIn: getLoginStatus(),
     subscriptions: readJSON(SUBSCRIPTIONS_FILE, []).length,
     sseClients: sseClients.size,
     logFile: getLogFilePath(),
+    rateLimits: RATE_LIMIT,
+    cacheSize: postCache.size,
   });
 });
 
@@ -1141,7 +2116,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
   logger.info(`╔══════════════════════════════════════════╗`);
-  logger.info(`║   微博归档器 v0.0.2  已启动              ║`);
+  logger.info(`║   微博归档器 v0.2.0  已启动              ║`);
   logger.info(`║   http://localhost:${PORT}                  ║`);
   logger.info(`╚══════════════════════════════════════════╝`);
 
@@ -1154,6 +2129,78 @@ app.listen(PORT, () => {
   }
 
   restoreSchedulers();
+
+  // v0.0.9：启动时恢复未完成的断点任务
+  restoreCheckpoints();
 });
+
+// ─── v0.0.9：启动时恢复断点任务 ──────────────────────────────────────────────
+
+function restoreCheckpoints() {
+  const cpLogger = createLogger('CheckpointRestore');
+  if (!fs.existsSync(USERS_DIR)) return;
+
+  const entries = fs.readdirSync(USERS_DIR, { withFileTypes: true })
+    .filter(d => d.isDirectory())
+    .map(d => d.name);
+
+  let restored = 0;
+  for (const uid of entries) {
+    const checkpointFile = path.join(USERS_DIR, uid, 'checkpoint.json');
+    if (!fs.existsSync(checkpointFile)) continue;
+
+    const cp = readJSON(checkpointFile, null);
+    if (!cp || !cp.uid) continue;
+
+    cpLogger.info(`发现断点任务`, { uid, abortedAt: cp.abortedAt, fetchedCount: cp.fetchedPostCount });
+
+    // 检查该用户是否在订阅列表中
+    const subs = readJSON(SUBSCRIPTIONS_FILE, []);
+    if (!subs.find(s => s.uid === uid)) {
+      cpLogger.warn(`用户 ${uid} 不在订阅列表中，跳过断点恢复`);
+      continue;
+    }
+
+    // 自动触发增量抓取来恢复
+    updateProgress(uid, {
+      status: 'fetching',
+      message: `🔄 正在恢复断点任务（上次获取了 ${cp.fetchedPostCount || '?'} 条）...`,
+      progress: 5,
+      total: 100,
+    });
+
+    // 延迟 2 秒后入队，避免启动时并发冲击
+    setTimeout(() => {
+      enqueueFetch(uid, true); // 增量模式恢复
+    }, 2000 + restored * 3000); // 每个恢复任务间隔 3 秒
+
+    restored++;
+  }
+
+  if (restored > 0) {
+    cpLogger.info(`已恢复 ${restored} 个断点任务`);
+  }
+}
+
+// ─── 优雅退出 ──────────────────────────────────────────────────────────────
+
+async function gracefulShutdown(signal) {
+  logger.info(`收到 ${signal}，正在优雅退出...`);
+  try {
+    if (sharedBrowserContext) { await sharedBrowserContext.close(); sharedBrowserContext = null; }
+  } catch (_) {}
+  try {
+    if (sharedBrowser) { await sharedBrowser.close(); sharedBrowser = null; }
+  } catch (_) {}
+  try {
+    if (loginBrowser) { await loginBrowser.close(); loginBrowser = null; }
+  } catch (_) {}
+  if (logStream) { try { logStream.end(); } catch (_) {} }
+  logger.info('浏览器资源已清理，进程退出');
+  process.exit(0);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 module.exports = app;

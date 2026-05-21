@@ -1,6 +1,6 @@
 {
   "name": "weibo-archiver",
-  "version": "0.0.2",
+  "version": "0.2.0",
   "description": "微博订阅归档器 - 本地化保存和展示微博内容",
   "main": "server.js",
   "scripts": {

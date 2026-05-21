@@ -1,6 +1,9 @@
 /* ============================================================
-   微博归档器 v0.0.2 - 前端应用
-   新增：SSE 实时进度 / 登录验证反馈 / 进度条 / 日志面板
+   微博归档器 v0.2.0 - 前端应用
+   v0.2.0: 搜索功能 / 全量强制抓取 / 分页控件 / 图片下载 / 搜索高亮
+   v0.1.0: 全量只允许首次 / 已有帖子缺图片补全 / Cookie失效后图片不丢失
+   v0.0.9: 后台持续抓取 / 已有图片+帖子检测跳过 / 启动时恢复断点
+   v0.0.8: 并发任务队列 / 终止抓取+断点恢复 / Cookie失效时保留已抓数据
    ============================================================ */
 
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -12,6 +15,7 @@ const API = {
   authStatus:   (verify = false) => fetch(`/api/auth/status${verify ? '?verify=true' : ''}`).then(r => r.json()),
   authVerify:   () => fetch('/api/auth/verify', { method: 'POST' }).then(r => r.json()),
   login:        () => fetch('/api/auth/login', { method: 'POST' }).then(r => r.json()),
+  confirmLogin: () => fetch('/api/auth/confirm-login', { method: 'POST' }).then(r => r.json()),
   logout:       () => fetch('/api/auth/logout', { method: 'POST' }).then(r => r.json()),
   setCookie:    (cookie) => fetch('/api/auth/set-cookie', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -23,13 +27,31 @@ const API = {
     body: JSON.stringify({ input, intervalMinutes }),
   }).then(r => r.json()),
   deleteSub:    (uid) => fetch(`/api/subscriptions/${uid}`, { method: 'DELETE' }).then(r => r.json()),
-  posts:        (uid, page = 1) => fetch(`/api/posts/${uid}?page=${page}&pageSize=20`).then(r => r.json()),
+  posts:        (uid, page = 1, pageSize = 20) => fetch(`/api/posts/${uid}?page=${page}&pageSize=${pageSize}`).then(r => r.json()),
   fetch:        (uid, incremental = false) => fetch(`/api/fetch/${uid}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ incremental }),
   }).then(r => r.json()),
+  fullFetch:    (uid) => fetch(`/api/fetch/${uid}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ incremental: false, force: true }),
+  }).then(r => r.json()),
+  abortFetch:   (uid) => fetch(`/api/fetch/${uid}/abort`, { method: 'POST' }).then(r => r.json()),
+  fetchQueue:   () => fetch('/api/fetch/queue').then(r => r.json()),
   logs:         (limit = 100, level = '') => fetch(`/api/logs?limit=${limit}${level ? '&level='+level : ''}`).then(r => r.json()),
   health:       () => fetch('/api/health').then(r => r.json()),
+  search:       async (params) => {
+    const query = new URLSearchParams();
+    if (params.keyword) query.set('keyword', params.keyword);
+    if (params.scope) query.set('scope', params.scope);
+    if (params.startDate) query.set('startDate', params.startDate);
+    if (params.endDate) query.set('endDate', params.endDate);
+    if (params.picFilter && params.picFilter !== 'all') query.set('picFilter', params.picFilter);
+    query.set('page', params.page || 1);
+    query.set('pageSize', params.pageSize || 20);
+    const res = await fetch(`/api/search?${query.toString()}`);
+    return res.json();
+  },
 };
 
 // ─── 工具函数 ─────────────────────────────────────────────────────────────────
@@ -39,12 +61,18 @@ function formatTime(str) {
   try {
     const d = dayjs(str);
     if (!d.isValid()) return str;
-    const diff = dayjs().diff(d, 'minute');
+    const now = dayjs();
+    const diff = now.diff(d, 'minute');
+    // 近1小时内
     if (diff < 1) return '刚刚';
     if (diff < 60) return `${diff}分钟前`;
+    // 近24小时内
     if (diff < 1440) return `${Math.floor(diff / 60)}小时前`;
+    // 近30天内
     if (diff < 43200) return `${Math.floor(diff / 1440)}天前`;
-    return d.format('YYYY年MM月DD日 HH:mm');
+    // 超过30天：微博风格简洁日期
+    if (d.year() === now.year()) return d.format('MM月DD日');
+    return d.format('YYYY年MM月DD日');
   } catch (_) { return str; }
 }
 
@@ -52,6 +80,31 @@ function formatNum(n) {
   if (!n) return '0';
   if (n >= 10000) return (n / 10000).toFixed(1) + '万';
   return String(n);
+}
+
+/**
+ * 搜索高亮：将文本中匹配关键字的部分用 <mark> 标签包裹
+ * @param {string} text - 原始文本
+ * @param {string} keyword - 搜索关键字
+ * @returns {Array} - React 元素数组
+ */
+function highlightText(text, keyword) {
+  if (!keyword || !text) return [text || ''];
+  try {
+    const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`(${escaped})`, 'gi');
+    const parts = text.split(regex);
+    if (parts.length <= 1) return [text];
+    return parts.map((part, i) => {
+      if (regex.test(part)) {
+        regex.lastIndex = 0; // 重置正则 lastIndex
+        return <mark key={i} className="search-highlight">{part}</mark>;
+      }
+      return part;
+    });
+  } catch (_) {
+    return [text];
+  }
 }
 
 // ─── SSE Hook ─────────────────────────────────────────────────────────────────
@@ -91,7 +144,7 @@ function useSSE(onMessage) {
   }, []);
 }
 
-// ─── Toast ─────────────────────────────────────────────────────────────────────
+// ─── Toast ────────────────────────────────────────────────────────────────────
 
 function useToast() {
   const [toasts, setToasts] = useState([]);
@@ -118,7 +171,8 @@ function ToastContainer({ toasts }) {
 function ProgressBar({ progress = 0, status = 'idle', message = '' }) {
   if (status === 'idle' || status === 'success') return null;
   const isError = status === 'error';
-  const color = isError ? '#f44336' : '#ff6b35';
+  const isPaused = status === 'paused';
+  const color = isError ? '#f44336' : isPaused ? '#ff9800' : '#ff6b35';
   const pct = Math.max(0, Math.min(100, progress || 0));
 
   return (
@@ -144,7 +198,7 @@ function ProgressBar({ progress = 0, status = 'idle', message = '' }) {
   );
 }
 
-// ─── Lightbox ─────────────────────────────────────────────────────────────────
+// ─── Lightbox ──────────────────────────────────────────────────────────────────
 
 function Lightbox({ images, startIndex, onClose }) {
   const [idx, setIdx] = useState(startIndex || 0);
@@ -191,11 +245,26 @@ function PicGrid({ post, uid }) {
 
   const pics = useMemo(() => (post.pics || []).map((pic, i) => ({
     src: (post.localPics?.[i]) ? `/api/images/${uid}/${post.localPics[i]}` : pic,
+    filename: post.localPics?.[i] || null,
   })), [post, uid]);
 
   if (pics.length === 0) return null;
 
   const gridClass = ['', 'pic-grid-1', 'pic-grid-2', 'pic-grid-3'][Math.min(pics.length, 3)] || 'pic-grid-n';
+
+  // v0.2.0：图片下载处理
+  const handleDownload = (e, pic) => {
+    e.stopPropagation();
+    if (pic.filename) {
+      // 使用本地图片 API 触发下载
+      const link = document.createElement('a');
+      link.href = `/api/images/${uid}/${pic.filename}?download=true`;
+      link.download = '';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
 
   return (
     <div className={`pic-grid ${gridClass}`}>
@@ -204,6 +273,9 @@ function PicGrid({ post, uid }) {
           <img src={pic.src} alt={`图片${i + 1}`} loading="lazy"
             onError={e => { e.target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 150"><rect fill="%23f5f5f5" width="200" height="150"/><text fill="%23ccc" x="100" y="80" text-anchor="middle" font-size="13">图片加载失败</text></svg>'; }} />
           {i === 8 && pics.length > 9 && <div className="pic-more">+{pics.length - 9}</div>}
+          {pic.filename && (
+            <button className="pic-download-btn" title="下载图片" onClick={(e) => handleDownload(e, pic)}>⬇</button>
+          )}
         </div>
       ))}
       {lightbox !== null && (
@@ -215,13 +287,25 @@ function PicGrid({ post, uid }) {
 
 // ─── 微博卡片 ─────────────────────────────────────────────────────────────────
 
-function PostCard({ post, profile, uid }) {
+function PostCard({ post, profile, uid, highlightKeyword, searchMode }) {
   const [expanded, setExpanded] = useState(false);
   const text = post.text || '';
   const isLong = text.length > 220;
 
+  // v0.2.0：搜索高亮文本
+  const displayText = highlightKeyword
+    ? highlightText(text, highlightKeyword)
+    : text || <span className="text-empty">（无文字内容）</span>;
+
   return (
     <div className="post-card">
+      {/* v0.2.0：搜索模式下显示来源用户信息 */}
+      {searchMode && (post.userName || post.userAvatar) && (
+        <div className="search-result-source">
+          {post.userAvatar && <img src={post.userAvatar} alt={post.userName} className="search-source-avatar" onError={e => { e.target.style.display = 'none'; }} />}
+          <span className="search-source-name">{post.userName || `用户 ${post.uid}`}</span>
+        </div>
+      )}
       <div className="post-header">
         <div className="post-avatar">
           {profile.avatar
@@ -234,6 +318,7 @@ function PostCard({ post, profile, uid }) {
             <span>{formatTime(post.createdAt)}</span>
             {post.source && <span className="post-source"> · {post.source}</span>}
             {post.isRetweet && <span className="post-badge">转发</span>}
+            {(!post.pics || post.pics.length === 0) && <span className="post-badge no-pic-badge">无图</span>}
           </div>
         </div>
         <a href={`https://weibo.com/u/${uid}`} target="_blank" rel="noopener noreferrer" className="post-link-btn" title="查看微博主页">↗</a>
@@ -241,7 +326,7 @@ function PostCard({ post, profile, uid }) {
 
       <div className="post-content">
         <p className={`post-text ${!expanded && isLong ? 'text-clamped' : ''}`}>
-          {text || <span className="text-empty">（无文字内容）</span>}
+          {displayText}
         </p>
         {post.retweetedData && (
           <div className="retweet-box">
@@ -268,18 +353,212 @@ function PostCard({ post, profile, uid }) {
   );
 }
 
+// ─── 确认弹窗 ─────────────────────────────────────────────────────────────────
+
+function ConfirmModal({ title, message, confirmText, dangerous, onConfirm, onCancel }) {
+  return (
+    <div className="confirm-modal-overlay" onClick={onCancel}>
+      <div className="confirm-modal" onClick={e => e.stopPropagation()}>
+        <div className="confirm-modal-title">{title || '确认操作'}</div>
+        <div className="confirm-modal-message">{message}</div>
+        <div className="confirm-modal-actions">
+          <button className="confirm-modal-btn" onClick={onCancel}>取消</button>
+          <button className={`confirm-modal-btn ${dangerous ? 'danger' : 'primary'}`} onClick={onConfirm}>
+            {confirmText || '确认'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── 分页控件 ─────────────────────────────────────────────────────────────────
+
+function PaginationControl({ pagination, pageSizeOptions, onPageChange, onPageSizeChange, onJumpToPage }) {
+  const [jumpInput, setJumpInput] = useState('');
+  const { page, pageSize, total, totalPages } = pagination;
+
+  if (!total || total === 0) return null;
+
+  // 生成页码按钮列表
+  const getPageButtons = () => {
+    const buttons = [];
+    const maxVisible = 5;
+
+    if (totalPages <= maxVisible + 2) {
+      // 全部显示
+      for (let i = 1; i <= totalPages; i++) buttons.push(i);
+    } else {
+      buttons.push(1);
+      let start = Math.max(2, page - 1);
+      let end = Math.min(totalPages - 1, page + 1);
+
+      if (page <= 3) {
+        end = Math.min(4, totalPages - 1);
+      } else if (page >= totalPages - 2) {
+        start = Math.max(totalPages - 3, 2);
+      }
+
+      if (start > 2) buttons.push('...');
+      for (let i = start; i <= end; i++) buttons.push(i);
+      if (end < totalPages - 1) buttons.push('...');
+      buttons.push(totalPages);
+    }
+    return buttons;
+  };
+
+  const handleJump = () => {
+    const targetPage = parseInt(jumpInput);
+    if (targetPage >= 1 && targetPage <= totalPages) {
+      onJumpToPage(targetPage);
+      setJumpInput('');
+    }
+  };
+
+  return (
+    <div className="pagination-control">
+      <div className="page-size-section">
+        <span className="page-size-label">每页</span>
+        <select className="page-size-select" value={pageSize} onChange={e => onPageSizeChange(Number(e.target.value))}>
+          {(pageSizeOptions || [10, 20, 30, 40, 50]).map(size => (
+            <option key={size} value={size}>{size} 条</option>
+          ))}
+        </select>
+      </div>
+      <div className="page-nav">
+        <button className="page-btn" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>‹</button>
+        {getPageButtons().map((btn, i) =>
+          btn === '...'
+            ? <span key={`ellipsis-${i}`} className="page-ellipsis">...</span>
+            : <button key={btn} className={`page-btn ${btn === page ? 'active' : ''}`} onClick={() => onPageChange(btn)}>{btn}</button>
+        )}
+        <button className="page-btn" disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>›</button>
+      </div>
+      <div className="page-jump">
+        <span className="page-info">第 {page} / {totalPages} 页</span>
+        <input
+          className="page-jump-input"
+          type="number"
+          min="1"
+          max={totalPages}
+          value={jumpInput}
+          onChange={e => setJumpInput(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleJump(); }}
+          placeholder="跳转"
+        />
+        <button className="page-jump-btn" onClick={handleJump} disabled={!jumpInput}>跳转</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── 搜索栏 ──────────────────────────────────────────────────────────────────
+
+function SearchBar({ subscriptions, onSearch, onClear }) {
+  const [keyword, setKeyword] = useState('');
+  const [scope, setScope] = useState('all');
+  const [selectedUids, setSelectedUids] = useState([]);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [picFilter, setPicFilter] = useState('all');
+
+  const handleSearch = () => {
+    if (!keyword.trim()) return;
+    onSearch({
+      keyword: keyword.trim(),
+      scope: scope === 'all' ? 'all' : selectedUids.join(','),
+      startDate: startDate || null,
+      endDate: endDate || null,
+      picFilter,
+      page: 1,
+      pageSize: 20
+    });
+  };
+
+  const handleClear = () => {
+    setKeyword('');
+    setScope('all');
+    setSelectedUids([]);
+    setShowAdvanced(false);
+    setStartDate('');
+    setEndDate('');
+    setPicFilter('all');
+    onClear();
+  };
+
+  const toggleUid = (uid) => {
+    setSelectedUids(prev =>
+      prev.includes(uid) ? prev.filter(u => u !== uid) : [...prev, uid]
+    );
+  };
+
+  return (
+    <div className="search-bar">
+      <div className="search-main-row">
+        <input
+          className="search-input"
+          type="text"
+          placeholder="搜索帖子内容..."
+          value={keyword}
+          onChange={e => setKeyword(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') handleSearch(); }}
+        />
+        <select className="search-scope-select" value={scope} onChange={e => { setScope(e.target.value); if (e.target.value === 'all') setSelectedUids([]); }}>
+          <option value="all">全部用户</option>
+          <option value="custom">指定用户</option>
+        </select>
+        <button className="search-filter-btn" onClick={() => setShowAdvanced(v => !v)} title="高级筛选">
+          {showAdvanced ? '∧' : '∨'} 筛选
+        </button>
+        <button className="btn btn-primary btn-sm" onClick={handleSearch} disabled={!keyword.trim()}>搜索</button>
+        <button className="btn btn-ghost btn-sm" onClick={handleClear}>清除</button>
+      </div>
+
+      {scope === 'custom' && (
+        <div className="search-user-list">
+          {subscriptions.map(sub => (
+            <label key={sub.uid} className="search-user-check">
+              <input type="checkbox" checked={selectedUids.includes(sub.uid)} onChange={() => toggleUid(sub.uid)} />
+              <span>{sub.name || sub.uid}</span>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {showAdvanced && (
+        <div className="search-advanced">
+          <div className="search-advanced-row">
+            <label className="search-advanced-label">时间范围</label>
+            <input className="search-date-input" type="date" value={startDate} onChange={e => setStartDate(e.target.value)} />
+            <span>至</span>
+            <input className="search-date-input" type="date" value={endDate} onChange={e => setEndDate(e.target.value)} />
+          </div>
+          <div className="search-advanced-row">
+            <label className="search-advanced-label">图片筛选</label>
+            <button className={`search-filter-btn ${picFilter === 'all' ? 'active' : ''}`} onClick={() => setPicFilter('all')}>全部</button>
+            <button className={`search-filter-btn ${picFilter === 'withPics' ? 'active' : ''}`} onClick={() => setPicFilter('withPics')}>有图</button>
+            <button className={`search-filter-btn ${picFilter === 'noPics' ? 'active' : ''}`} onClick={() => setPicFilter('noPics')}>无图</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── 侧边栏条目 ───────────────────────────────────────────────────────────────
 
 function SidebarItem({ sub, isActive, onClick, onDelete, onFetch, toast }) {
   const [deleting, setDeleting] = useState(false);
+  const [showFullFetchConfirm, setShowFullFetchConfirm] = useState(false);
   const status = sub.fetchStatus || {};
   const isFetching = status.status === 'fetching';
+  const isPaused = status.status === 'paused';
   const progress = status.progress || 0;
   const isError = status.status === 'error';
 
   const handleDelete = async (e) => {
     e.stopPropagation();
-    if (!confirm(`确认删除订阅「${sub.name || sub.uid}」？\n本地数据不会被删除。`)) return;
     setDeleting(true);
     const res = await API.deleteSub(sub.uid);
     if (res.success) { toast('已删除', 'success'); onDelete(sub.uid); }
@@ -293,8 +572,27 @@ function SidebarItem({ sub, isActive, onClick, onDelete, onFetch, toast }) {
     else toast(res.error || '触发失败', 'error');
   };
 
+  const handleAbort = async (e) => {
+    e.stopPropagation();
+    const res = await API.abortFetch(sub.uid);
+    if (res.success) toast('终止信号已发送，正在保存进度...', 'info');
+    else toast(res.error || '终止失败', 'error');
+  };
+
+  // v0.2.0：全量强制抓取
+  const handleFullFetch = async () => {
+    setShowFullFetchConfirm(false);
+    const res = await API.fullFetch(sub.uid);
+    if (res.success) {
+      toast('全量抓取已启动，请等待进度更新', 'success');
+      onFetch();
+    } else {
+      toast(res.error || '触发失败', 'error');
+    }
+  };
+
   return (
-    <div className={`sidebar-item ${isActive ? 'active' : ''} ${isError ? 'has-error' : ''}`} onClick={onClick}>
+    <div className={`sidebar-item ${isActive ? 'active' : ''} ${isError ? 'has-error' : ''} ${isPaused ? 'has-paused' : ''}`} onClick={onClick}>
       <div className="sidebar-avatar">
         {sub.avatar && <img src={sub.avatar} alt={sub.name} onError={e => { e.target.style.display = 'none'; }} />}
         <span className="avatar-placeholder" style={sub.avatar ? {display:'none'} : {}}>
@@ -306,20 +604,38 @@ function SidebarItem({ sub, isActive, onClick, onDelete, onFetch, toast }) {
         <div className="sidebar-uid">
           {sub.postCount || 0} 条
           {isFetching && <span className="status-dot fetching" title="抓取中"></span>}
+          {isPaused && <span className="status-dot paused" title="已暂停"></span>}
           {isError && <span className="status-dot error" title={status.message}></span>}
           {status.status === 'success' && <span className="status-dot success"></span>}
         </div>
-        {isFetching && (
-          <ProgressBar progress={progress} status="fetching" message={status.message} />
+        {(isFetching || isPaused) && (
+          <ProgressBar progress={progress} status={isFetching ? 'fetching' : 'paused'} message={status.message} />
         )}
         {isError && <div className="sidebar-error-msg">{status.message}</div>}
+        {isPaused && <div className="sidebar-paused-msg" style={{fontSize:'11px',color:'#ff9800',marginTop:'2px'}}>⏸ 可增量继续</div>}
       </div>
       <div className="sidebar-actions">
+        {isFetching && (
+          <button className="icon-btn abort-btn" title="终止抓取" onClick={handleAbort}>⏹</button>
+        )}
         <button className="icon-btn" title="增量抓取" onClick={handleFetch} disabled={isFetching || deleting}>
           {isFetching ? <span className="spin">⟳</span> : '↻'}
         </button>
+        <button className="full-fetch-btn" title="全量抓取" onClick={(e) => { e.stopPropagation(); setShowFullFetchConfirm(true); }} disabled={isFetching || deleting}>
+          ⟳+
+        </button>
         <button className="icon-btn danger" title="删除订阅" onClick={handleDelete} disabled={deleting || isFetching}>✕</button>
       </div>
+      {showFullFetchConfirm && (
+        <ConfirmModal
+          title="全量抓取确认"
+          message={`即将对 ${sub.name || sub.uid} 进行全量抓取，可能耗时较长，是否继续？`}
+          confirmText="开始全量抓取"
+          dangerous={true}
+          onConfirm={handleFullFetch}
+          onCancel={() => setShowFullFetchConfirm(false)}
+        />
+      )}
     </div>
   );
 }
@@ -370,7 +686,7 @@ function AddSubscriptionModal({ onClose, onAdded, toast }) {
             <option value={720}>12 小时</option>
             <option value={1440}>每天</option>
           </select>
-          <p className="form-hint">首次添加将执行全量保存，之后按设定间隔自动增量更新。</p>
+          <p className="form-hint">首次添加将执行全量保存（如已有数据则自动增量），之后按设定间隔自动增量更新。</p>
         </div>
         <div className="modal-footer">
           <button className="btn btn-secondary" onClick={onClose}>取消</button>
@@ -385,13 +701,40 @@ function AddSubscriptionModal({ onClose, onAdded, toast }) {
 
 // ─── 登录弹窗 ─────────────────────────────────────────────────────────────────
 
+/**
+ * v0.0.5 重写：
+ * - 去掉 setInterval 轮询（根因误判）
+ * - 打开浏览器后显示「我已完成登录」按钮，用户手动确认
+ * - 通过 SSE loginWindowOpen / loginResult 同步状态
+ */
 function LoginModal({ onClose, onLoginSuccess, toast }) {
   const [mode, setMode] = useState('auto');
   const [cookieStr, setCookieStr] = useState('');
   const [loading, setLoading] = useState(false);
-  const [polling, setPolling] = useState(false);
+  const [windowOpen, setWindowOpen] = useState(false); // 登录窗口是否已打开
+  const [confirming, setConfirming] = useState(false); // 正在提交"我已完成登录"
   const [verifyResult, setVerifyResult] = useState(null);
-  const pollRef = useRef(null);
+
+  // 监听 SSE 登录事件
+  useSSE((data) => {
+    if (data.type === 'loginWindowOpen') {
+      setWindowOpen(true);
+      setLoading(false);
+    }
+    if (data.type === 'loginResult') {
+      setConfirming(false);
+      if (data.success) {
+        setVerifyResult({ valid: true, name: data.userInfo?.name, uid: data.userInfo?.uid });
+        const name = data.userInfo?.name || data.userInfo?.uid || '';
+        toast(name ? `✅ 登录成功！欢迎 ${name}` : '✅ 登录成功！Cookie 已持久化', 'success', 5000);
+        onLoginSuccess();
+        setTimeout(onClose, 1200);
+      } else {
+        setVerifyResult({ valid: false, error: data.message });
+        toast(data.message || '登录失败', 'error');
+      }
+    }
+  });
 
   const handleAutoLogin = async () => {
     setLoading(true);
@@ -404,41 +747,33 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
         onClose();
         return;
       }
-      if (res.success) {
-        toast('已打开登录窗口，请在弹出的浏览器中完成登录...', 'info', 10000);
-        setPolling(true);
-        setLoading(false);
-        pollRef.current = setInterval(async () => {
-          try {
-            const status = await API.authStatus();
-            if (status.data?.loggedIn) {
-              clearInterval(pollRef.current);
-              setPolling(false);
-              // 做一次在线验证确认
-              try {
-                const v = await API.authVerify();
-                setVerifyResult(v.data);
-                if (v.data?.valid === true) {
-                  toast(`登录成功！欢迎 ${v.data.name || v.data.uid}`, 'success');
-                } else {
-                  toast('Cookie 已保存', 'success');
-                }
-              } catch (_) {
-                toast('登录成功！Cookie 已保存', 'success');
-              }
-              onLoginSuccess();
-              setTimeout(onClose, 1500);
-            }
-          } catch (_) {}
-        }, 2000);
-        setTimeout(() => {
-          if (pollRef.current) { clearInterval(pollRef.current); setPolling(false); }
-        }, 6 * 60 * 1000);
+      if (res.pending) {
+        // 等待 SSE loginWindowOpen 推送
+        toast('已打开登录窗口，请在浏览器完成登录...', 'info', 8000);
       }
     } catch (_) {
       toast('启动登录窗口失败，请使用手动方式', 'error');
       setLoading(false);
     }
+  };
+
+  const handleConfirmLogin = async () => {
+    setConfirming(true);
+    setVerifyResult(null);
+    try {
+      const res = await API.confirmLogin();
+      if (res.success) {
+        setVerifyResult({ valid: true, name: res.userInfo?.name, uid: res.userInfo?.uid });
+        const name = res.userInfo?.name || res.userInfo?.uid || '';
+        toast(name ? `✅ 登录成功！欢迎 ${name}` : '✅ Cookie 已保存', 'success', 5000);
+        onLoginSuccess();
+        setTimeout(onClose, 1200);
+      } else {
+        setVerifyResult({ valid: false, error: res.error || '验证失败，请确认已在浏览器中完成登录' });
+        toast(res.error || '未检测到登录 Cookie，请先在浏览器中完成登录', 'error');
+      }
+    } catch (_) { toast('网络错误', 'error'); }
+    setConfirming(false);
   };
 
   const handleManualCookie = async () => {
@@ -460,8 +795,6 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
     setLoading(false);
   };
 
-  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
-
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-box modal-login" onClick={e => e.stopPropagation()}>
@@ -478,18 +811,38 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
         <div className="modal-body">
           {mode === 'auto' ? (
             <div className="login-auto">
-              <div className="login-icon">🌐</div>
-              <p>点击下方按钮，自动打开微博登录页面。</p>
-              <p>完成登录后，Cookie 自动保存并验证，<strong>重启服务无需再次登录</strong>。</p>
-              {polling ? (
-                <div className="login-polling">
-                  <div className="spinner"></div>
-                  <span>等待浏览器登录完成，请在弹出的浏览器中完成登录...</span>
-                </div>
+              <div className="login-icon">📱</div>
+              {!windowOpen ? (
+                <>
+                  <p>点击下方按钮，将自动打开<strong>微博移动端登录页</strong>（m.weibo.cn）。</p>
+                  <p>使用手机号/账号密码或扫码完成登录，然后点击「<strong>我已完成登录</strong>」按钮保存 Cookie。</p>
+                  <p className="login-tip">💡 提示：完成登录前请不要关闭弹出的浏览器窗口</p>
+                  <button className="btn btn-primary btn-block" onClick={handleAutoLogin} disabled={loading} style={{marginTop:'16px'}}>
+                    {loading ? <><span className="spin">⟳</span> 正在打开...</> : '打开微博登录窗口'}
+                  </button>
+                </>
               ) : (
-                <button className="btn btn-primary btn-block" onClick={handleAutoLogin} disabled={loading}>
-                  {loading ? '正在打开...' : '打开微博登录窗口'}
-                </button>
+                <>
+                  <div className="login-window-open-hint">
+                    <div className="login-window-icon">🌐</div>
+                    <p><strong>浏览器登录窗口已打开</strong></p>
+                    <p style={{fontSize:'13px',color:'var(--text-muted)',marginBottom:'16px'}}>
+                      请在弹出的浏览器中完成登录，然后回到这里点击下方按钮。
+                    </p>
+                    <button
+                      className="btn btn-primary btn-block confirm-login-btn"
+                      onClick={handleConfirmLogin}
+                      disabled={confirming}
+                    >
+                      {confirming
+                        ? <><span className="spin">⟳</span> 正在验证 Cookie...</>
+                        : '✅ 我已完成登录'}
+                    </button>
+                  </div>
+                  <p className="login-tip" style={{marginTop:'12px'}}>
+                    💡 如果登录后按钮提示"未检测到 Cookie"，可等待 3 秒后再试
+                  </p>
+                </>
               )}
               {verifyResult && (
                 <div className={`verify-result ${verifyResult.valid ? 'success' : 'fail'}`}>
@@ -628,16 +981,36 @@ function EmptyState({ loggedIn, onAddClick, onLoginClick }) {
 function App() {
   const { toasts, show: toast } = useToast();
   const [loggedIn, setLoggedIn] = useState(false);
+  const [serverDown, setServerDown] = useState(false);
   const [subscriptions, setSubscriptions] = useState([]);
   const [fetchStatuses, setFetchStatuses] = useState({}); // uid -> status obj (来自 SSE)
   const [activeUid, setActiveUid] = useState(null);
   const [posts, setPosts] = useState([]);
   const [profile, setProfile] = useState({});
-  const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0 });
+  const [pagination, setPagination] = useState({ page: 1, totalPages: 1, total: 0, pageSize: 20 });
   const [loadingPosts, setLoadingPosts] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
+  const [picFilter, setPicFilter] = useState('all'); // 'all' | 'withPics' | 'noPics'
+
+  // v0.2.0：搜索相关状态
+  const [searchMode, setSearchMode] = useState(false);
+  const [searchParams, setSearchParams] = useState(null);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchPagination, setSearchPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
+  const [searchKeyword, setSearchKeyword] = useState('');
+
+  // v0.2.0：帖子分页增强 — pageSize 持久化
+  const [postsPageSize, setPostsPageSize] = useState(() => {
+    return parseInt(localStorage.getItem('weibo_archiver_posts_page_size')) || 20;
+  });
+
+  // v0.2.0：订阅列表分页+排序
+  const [subsPage, setSubsPage] = useState(1);
+  const [subsPageSize, setSubsPageSize] = useState(() => {
+    return parseInt(localStorage.getItem('weibo_archiver_subs_page_size')) || 10;
+  });
 
   // SSE：接收进度推送和登录结果
   useSSE((data) => {
@@ -647,7 +1020,7 @@ function App() {
 
       // 抓取成功后自动刷新帖子
       if (status.status === 'success' && uid === activeUidRef.current) {
-        setTimeout(() => loadPosts(uid, 1), 500);
+        setTimeout(() => loadPosts(uid, 1, postsPageSizeRef.current), 500);
       }
       // 刷新订阅列表（更新 postCount）
       if (status.status === 'success') {
@@ -666,6 +1039,8 @@ function App() {
   // 用于在 SSE 回调中读取最新值（避免闭包问题）
   const activeUidRef = useRef(activeUid);
   useEffect(() => { activeUidRef.current = activeUid; }, [activeUid]);
+  const postsPageSizeRef = useRef(postsPageSize);
+  useEffect(() => { postsPageSizeRef.current = postsPageSize; }, [postsPageSize]);
 
   // 初始化
   useEffect(() => {
@@ -678,14 +1053,14 @@ function App() {
 
   // 切换用户加载帖子
   useEffect(() => {
-    if (activeUid) loadPosts(activeUid, 1);
+    if (activeUid) loadPosts(activeUid, 1, postsPageSize);
   }, [activeUid]);
 
   const refreshAuth = async () => {
     try {
       const res = await API.authStatus();
-      if (res.success) setLoggedIn(res.data.loggedIn);
-    } catch (_) {}
+      if (res.success) { setLoggedIn(res.data.loggedIn); setServerDown(false); }
+    } catch (_) { setServerDown(true); }
   };
 
   const refreshSubscriptions = async (silent = false) => {
@@ -693,6 +1068,7 @@ function App() {
       const res = await API.subscriptions();
       if (res.success) {
         setSubscriptions(res.data);
+        setServerDown(false);
         if (!activeUidRef.current && res.data.length > 0) {
           setActiveUid(res.data[0].uid);
         }
@@ -707,19 +1083,20 @@ function App() {
           return next;
         });
       }
-    } catch (_) {}
+    } catch (_) { setServerDown(true); }
   };
 
-  const loadPosts = async (uid, page = 1) => {
+  const loadPosts = async (uid, page = 1, pageSize = 20) => {
     setLoadingPosts(true);
     try {
-      const res = await API.posts(uid, page);
+      const res = await API.posts(uid, page, pageSize);
       if (res.success) {
         setPosts(page === 1 ? res.data.posts : prev => [...prev, ...res.data.posts]);
         setProfile(res.data.profile || {});
-        setPagination(res.data.pagination || { page: 1, totalPages: 1, total: 0 });
+        setPagination(res.data.pagination || { page: 1, totalPages: 1, total: 0, pageSize });
+        setServerDown(false);
       }
-    } catch (_) { toast('加载帖子失败', 'error'); }
+    } catch (_) { toast('加载帖子失败，请检查服务器是否运行', 'error'); setServerDown(true); }
     setLoadingPosts(false);
   };
 
@@ -732,41 +1109,154 @@ function App() {
     }
   };
 
+  // v0.2.0：搜索相关方法
+  const handleSearch = async (params) => {
+    setSearchMode(true);
+    setSearchParams(params);
+    setSearchKeyword(params.keyword);
+    setLoadingPosts(true);
+    try {
+      const res = await API.search(params);
+      if (res.success) {
+        setSearchResults(res.data.posts);
+        setSearchPagination(res.data.pagination);
+      } else {
+        toast(res.error || '搜索失败', 'error');
+      }
+    } catch (_) {
+      toast('搜索请求失败', 'error');
+    }
+    setLoadingPosts(false);
+  };
+
+  const handleSearchPageChange = async (newPage) => {
+    if (!searchParams) return;
+    const updatedParams = { ...searchParams, page: newPage };
+    setSearchParams(updatedParams);
+    setLoadingPosts(true);
+    try {
+      const res = await API.search(updatedParams);
+      if (res.success) {
+        setSearchResults(res.data.posts);
+        setSearchPagination(res.data.pagination);
+      }
+    } catch (_) {
+      toast('搜索请求失败', 'error');
+    }
+    setLoadingPosts(false);
+  };
+
+  const handleClearSearch = () => {
+    setSearchMode(false);
+    setSearchParams(null);
+    setSearchResults([]);
+    setSearchKeyword('');
+  };
+
+  // v0.2.0：帖子分页事件处理
+  const handlePostsPageChange = (newPage) => {
+    if (activeUid) loadPosts(activeUid, newPage, postsPageSize);
+  };
+
+  const handlePostsPageSizeChange = (newSize) => {
+    setPostsPageSize(newSize);
+    localStorage.setItem('weibo_archiver_posts_page_size', String(newSize));
+    if (activeUid) loadPosts(activeUid, 1, newSize);
+  };
+
+  // v0.2.0：订阅列表分页事件处理
+  const handleSubsPageChange = (newPage) => {
+    setSubsPage(newPage);
+  };
+
+  const handleSubsPageSizeChange = (newSize) => {
+    setSubsPageSize(newSize);
+    localStorage.setItem('weibo_archiver_subs_page_size', String(newSize));
+    setSubsPage(1);
+  };
+
   // 合并订阅列表和实时状态
   const subsWithStatus = useMemo(() => subscriptions.map(sub => ({
     ...sub,
     fetchStatus: fetchStatuses[sub.uid] || sub.fetchStatus || { status: 'idle', message: '' },
   })), [subscriptions, fetchStatuses]);
 
+  // v0.2.0：订阅列表排序 + 分页
+  const sortedSubs = useMemo(() => {
+    return [...subsWithStatus].sort((a, b) => (a.name || '').localeCompare(b.name || '', 'zh-CN'));
+  }, [subsWithStatus]);
+
+  const totalSubs = sortedSubs.length;
+  const subsTotalPages = Math.ceil(totalSubs / subsPageSize) || 1;
+  const pagedSubs = sortedSubs.slice((subsPage - 1) * subsPageSize, subsPage * subsPageSize);
+
   const activeSub = subsWithStatus.find(s => s.uid === activeUid);
   const activeStatus = activeSub?.fetchStatus || {};
   const isFetching = activeStatus.status === 'fetching';
+  const isPaused = activeStatus.status === 'paused';
 
   const handleFullFetch = async () => {
-    const res = await API.fetch(activeUid, false);
-    if (res.success) toast('全量抓取已开始，请等待进度更新', 'success');
-    else toast(res.error || '触发失败', 'error');
+    try {
+      // v0.2.0：使用 force 全量抓取
+      const res = await API.fullFetch(activeUid);
+      if (res.success) {
+        toast('全量抓取已启动，请等待进度更新', 'success');
+      } else {
+        toast(res.error || '触发失败', 'error');
+      }
+    } catch (_) {
+      toast('无法连接服务器，请检查服务是否正在运行', 'error');
+    }
   };
 
   const handleIncrFetch = async () => {
-    const res = await API.fetch(activeUid, true);
-    if (res.success) toast('增量抓取已开始', 'success');
-    else toast(res.error || '触发失败', 'error');
+    try {
+      const res = await API.fetch(activeUid, true);
+      if (res.success) toast('增量抓取已开始', 'success');
+      else toast(res.error || '触发失败', 'error');
+    } catch (_) {
+      toast('无法连接服务器，请检查服务是否正在运行', 'error');
+    }
+  };
+
+  const handleAbortFetch = async () => {
+    try {
+      const res = await API.abortFetch(activeUid);
+      if (res.success) toast('终止信号已发送，正在保存进度...', 'info');
+      else toast(res.error || '终止失败', 'error');
+    } catch (_) {
+      toast('无法连接服务器', 'error');
+    }
   };
 
   return (
     <div className="app">
+      {/* 服务器离线警告 */}
+      {serverDown && (
+        <div style={{
+          background: '#f44336', color: '#fff', textAlign: 'center',
+          padding: '8px 16px', fontSize: '13px', fontWeight: 500,
+        }}>
+          ⚠️ 无法连接服务器，请确认后端服务正在运行（node server.js）
+        </div>
+      )}
       {/* 顶部导航 */}
       <header className="app-header">
         <div className="header-left">
           <span className="app-logo">微</span>
-          <span className="app-title">微博归档器 <span className="version-badge">v0.0.2</span></span>
+          <span className="app-title">微博归档器 <span className="version-badge">v0.2.0</span></span>
         </div>
         <div className="header-right">
           {loggedIn ? (
             <>
               <span className="login-status"><span className="status-dot success"></span>已登录</span>
-              <button className="btn btn-ghost btn-sm" onClick={() => { if (confirm('确认退出登录？')) { API.logout().then(() => { setLoggedIn(false); toast('已退出', 'info'); }); } }}>退出</button>
+              <button className="btn btn-ghost btn-sm" onClick={async () => {
+                try {
+                  const res = await API.logout();
+                  if (res.success) { setLoggedIn(false); toast('已退出登录', 'info'); }
+                  else toast(res.message || '退出失败', 'error');
+                } catch (_) { toast('无法连接服务器', 'error'); }
+              }}>退出</button>
             </>
           ) : (
             <button className="btn btn-primary btn-sm" onClick={() => setShowLoginModal(true)}>🔐 登录微博</button>
@@ -783,20 +1273,103 @@ function App() {
             <span>订阅列表</span>
             <span className="count-badge">{subscriptions.length}</span>
           </div>
-          {subsWithStatus.length === 0
+
+          {/* v0.2.0：搜索栏 */}
+          <SearchBar
+            subscriptions={subscriptions}
+            onSearch={handleSearch}
+            onClear={handleClearSearch}
+          />
+
+          {pagedSubs.length === 0
             ? <div className="sidebar-empty">暂无订阅</div>
-            : subsWithStatus.map(sub => (
+            : pagedSubs.map(sub => (
                 <SidebarItem key={sub.uid} sub={sub} isActive={sub.uid === activeUid}
-                  onClick={() => { if (sub.uid !== activeUid) { setActiveUid(sub.uid); setPosts([]); } }}
+                  onClick={() => {
+                    if (sub.uid !== activeUid) {
+                      setActiveUid(sub.uid);
+                      setPosts([]);
+                      // 退出搜索模式
+                      if (searchMode) handleClearSearch();
+                    }
+                  }}
                   onDelete={handleDeleteSub} onFetch={refreshSubscriptions} toast={toast} />
               ))
           }
+
+          {/* v0.2.0：订阅列表分页 */}
+          {totalSubs > 0 && (
+            <PaginationControl
+              pagination={{ page: subsPage, pageSize: subsPageSize, total: totalSubs, totalPages: subsTotalPages }}
+              pageSizeOptions={[5, 10, 20]}
+              onPageChange={handleSubsPageChange}
+              onPageSizeChange={handleSubsPageSizeChange}
+              onJumpToPage={handleSubsPageChange}
+            />
+          )}
         </aside>
 
         {/* 主内容区 */}
         <main className="main-content">
           {!activeUid ? (
             <EmptyState loggedIn={loggedIn} onAddClick={() => setShowAddModal(true)} onLoginClick={() => setShowLoginModal(true)} />
+          ) : searchMode ? (
+            /* v0.2.0：搜索结果展示 */
+            <>
+              <div className="content-header">
+                <div className="content-profile">
+                  <div>
+                    <div className="content-name">搜索结果：{searchKeyword}</div>
+                    <div className="content-stats">共 {searchPagination.total} 条匹配</div>
+                  </div>
+                </div>
+                <div className="content-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={handleClearSearch}>✕ 退出搜索</button>
+                </div>
+              </div>
+
+              {loadingPosts ? (
+                <div className="loading-state"><div className="spinner"></div><span>搜索中...</span></div>
+              ) : searchResults.length === 0 ? (
+                <div className="empty-posts">
+                  <p>未找到匹配的帖子</p>
+                </div>
+              ) : (
+                <>
+                  <div className="posts-list">
+                    {searchResults
+                      .filter(post => {
+                        if (picFilter === 'withPics') return post.pics && post.pics.length > 0;
+                        if (picFilter === 'noPics') return !post.pics || post.pics.length === 0;
+                        return true;
+                      })
+                      .map(post => {
+                        // 搜索结果中的帖子，使用帖子自带的 uid/userName/userAvatar
+                        const postProfile = {
+                          name: post.userName || `用户 ${post.uid}`,
+                          avatar: post.userAvatar || '',
+                        };
+                        return <PostCard
+                          key={post.mid}
+                          post={post}
+                          profile={postProfile}
+                          uid={post.uid || activeUid}
+                          highlightKeyword={searchKeyword}
+                          searchMode={true}
+                        />;
+                      })
+                    }
+                  </div>
+                  <PaginationControl
+                    pagination={searchPagination}
+                    pageSizeOptions={[10, 20, 30, 40, 50]}
+                    onPageChange={handleSearchPageChange}
+                    onPageSizeChange={() => {}}
+                    onJumpToPage={handleSearchPageChange}
+                  />
+                </>
+              )}
+            </>
           ) : (
             <>
               <div className="content-header">
@@ -812,17 +1385,29 @@ function App() {
                     <div className="fetch-indicator-wrap">
                       <div className="spinner spinner-sm"></div>
                       <span>{activeStatus.message}</span>
+                      {/* v0.2.0：全量模式标签 */}
+                      {activeStatus.fullFetchMode && (
+                        <span className="full-fetch-mode-tag">全量模式</span>
+                      )}
                       {activeStatus.progress > 0 && activeStatus.progress < 100 && (
                         <span style={{color:'#ff6b35'}}> {activeStatus.progress}%</span>
                       )}
+                      <button className="btn btn-danger btn-sm" onClick={handleAbortFetch} style={{marginLeft:'8px',background:'#f44336',color:'#fff',border:'none'}}>
+                        ⏹ 终止
+                      </button>
+                    </div>
+                  )}
+                  {isPaused && (
+                    <div className="fetch-indicator-wrap" style={{color:'#ff9800'}}>
+                      ⏸ {activeStatus.message}
                     </div>
                   )}
                   {activeStatus.status === 'error' && (
                     <div className="fetch-error-inline">{activeStatus.message}</div>
                   )}
                   <a href={`https://weibo.com/u/${activeUid}`} target="_blank" rel="noopener noreferrer" className="btn btn-ghost btn-sm">查看微博主页 ↗</a>
-                  <button className="btn btn-ghost btn-sm" onClick={handleIncrFetch} disabled={isFetching}>增量抓取</button>
-                  <button className="btn btn-primary btn-sm" onClick={handleFullFetch} disabled={isFetching}>全量抓取</button>
+                  <button className="btn btn-primary btn-sm" onClick={handleIncrFetch} disabled={isFetching}>增量抓取</button>
+                  <button className="btn btn-sm" onClick={handleFullFetch} disabled={isFetching} style={{background:'#ff6d00',color:'#fff',border:'none'}}>全量抓取</button>
                 </div>
               </div>
 
@@ -836,6 +1421,11 @@ function App() {
               <div className="posts-info">
                 共 <strong>{pagination.total}</strong> 条归档内容
                 {activeSub?.lastFetch && <span className="last-fetch"> · 最近更新：{formatTime(activeSub.lastFetch)}</span>}
+                <span className="filter-group">
+                  <button className={`filter-btn ${picFilter === 'all' ? 'active' : ''}`} onClick={() => setPicFilter('all')}>全部</button>
+                  <button className={`filter-btn ${picFilter === 'withPics' ? 'active' : ''}`} onClick={() => setPicFilter('withPics')}>有图</button>
+                  <button className={`filter-btn ${picFilter === 'noPics' ? 'active' : ''}`} onClick={() => setPicFilter('noPics')}>无图</button>
+                </span>
               </div>
 
               {loadingPosts && posts.length === 0 ? (
@@ -851,22 +1441,30 @@ function App() {
                   ) : (
                     <>
                       <p>暂无归档内容</p>
-                      <button className="btn btn-primary" onClick={handleFullFetch}>立即全量抓取</button>
+                      <button className="btn btn-primary" onClick={handleFullFetch}>立即抓取</button>
                     </>
                   )}
                 </div>
               ) : (
                 <>
                   <div className="posts-list">
-                    {posts.map(post => <PostCard key={post.mid} post={post} profile={profile} uid={activeUid} />)}
+                    {posts
+                      .filter(post => {
+                        if (picFilter === 'withPics') return post.pics && post.pics.length > 0;
+                        if (picFilter === 'noPics') return !post.pics || post.pics.length === 0;
+                        return true;
+                      })
+                      .map(post => <PostCard key={post.mid} post={post} profile={profile} uid={activeUid} />)
+                    }
                   </div>
-                  {pagination.page < pagination.totalPages && (
-                    <div className="load-more">
-                      <button className="btn btn-ghost" onClick={() => loadPosts(activeUid, pagination.page + 1)} disabled={loadingPosts}>
-                        {loadingPosts ? '加载中...' : `加载更多（${posts.length}/${pagination.total}）`}
-                      </button>
-                    </div>
-                  )}
+                  {/* v0.2.0：帖子列表分页控件 */}
+                  <PaginationControl
+                    pagination={pagination}
+                    pageSizeOptions={[10, 20, 30, 40, 50]}
+                    onPageChange={handlePostsPageChange}
+                    onPageSizeChange={handlePostsPageSizeChange}
+                    onJumpToPage={handlePostsPageChange}
+                  />
                 </>
               )}
             </>

@@ -1,0 +1,43 @@
+sequenceDiagram
+    participant User as 用户
+    participant SB as SearchBar组件
+    participant App as App组件
+    participant API as 后端API
+    participant Cache as 内存缓存(postCache)
+    participant FS as 文件系统
+
+    User->>SB: 输入关键字 + 选择范围 + 设置筛选条件
+    User->>SB: 点击搜索/回车
+
+    SB->>App: onSearch({keyword, scope, startDate, endDate, picFilter, page, pageSize})
+    App->>App: 设置 searchMode=true, 保存 searchParams
+
+    App->>API: GET /api/search?keyword=xxx&scope=all&startDate=...&page=1&pageSize=20
+    
+    API->>API: 解析 scope → 确定 uid 列表
+    loop 遍历每个 uid
+        API->>Cache: cacheGet(uid)
+        alt 缓存命中
+            Cache-->>API: 返回 posts 数组
+        else 缓存未命中
+            API->>FS: readJSON(posts.json)
+            FS-->>API: 返回 posts 数组
+            API->>Cache: cacheSet(uid, posts)
+        end
+    end
+
+    API->>API: 遍历所有帖子，对 text 做 includes(keyword) 匹配
+    API->>API: 应用时间范围筛选 (startDate ~ endDate)
+    API->>API: 应用图片筛选 (picFilter)
+    API->>API: 按时间倒序排列 + 分页切片
+
+    API-->>App: {success: true, data: {posts, pagination, keyword}}
+
+    App->>App: 设置 searchResults, searchPagination
+    App->>App: 渲染搜索结果列表（PostCard 带 highlightKeyword）
+
+    Note over App: PostCard 渲染时调用 renderHighlightedText<br/>将匹配关键字用 mark 标签高亮
+
+    User->>App: 翻页操作
+    App->>API: GET /api/search?keyword=xxx&...&page=2
+    API-->>App: 返回第二页结果

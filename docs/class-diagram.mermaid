@@ -1,0 +1,126 @@
+classDiagram
+    class App {
+        +loggedIn: boolean
+        +subscriptions: Subscription[]
+        +activeUid: string|null
+        +posts: Post[]
+        +pagination: PaginationState
+        +searchMode: boolean
+        +searchParams: SearchParams
+        +searchResults: SearchResultPost[]
+        +searchPagination: PaginationState
+        +subPageInfo: SubscriptionPaginationState
+        +picFilter: string
+        +handleFullFetch(uid, force: bool)
+        +handleSearch(params: SearchParams)
+        +loadPosts(uid, page, pageSize)
+    }
+
+    class SidebarItem {
+        +sub: Subscription
+        +isActive: boolean
+        +onFullFetch(uid)
+        +handleIncrFetch()
+        +handleForceFullFetch()
+    }
+
+    class SearchBar {
+        +keyword: string
+        +scope: string
+        +selectedUids: string[]
+        +startDate: string|null
+        +endDate: string|null
+        +picFilter: string
+        +onSearch(params: SearchParams)
+        +onClear()
+    }
+
+    class PostCard {
+        +post: Post|SearchResultPost
+        +profile: Profile
+        +uid: string
+        +highlightKeyword: string|null
+        +renderHighlightedText(text, keyword)
+    }
+
+    class PicGrid {
+        +post: Post
+        +uid: string
+        +lightbox: number|null
+        +onDownload(imageUrl, filename)
+    }
+
+    class PaginationControl {
+        +pagination: PaginationState
+        +pageSizeOptions: number[]
+        +onPageChange(page)
+        +onPageSizeChange(size)
+        +onJumpToPage(page)
+    }
+
+    class ConfirmModal {
+        +title: string
+        +message: string
+        +confirmText: string
+        +dangerous: boolean
+        +onConfirm()
+        +onCancel()
+    }
+
+    App --> SidebarItem
+    App --> SearchBar
+    App --> PostCard
+    App --> PaginationControl
+    App --> ConfirmModal
+    PostCard --> PicGrid
+
+    class SearchParams {
+        +keyword: string
+        +scope: string
+        +startDate: string|null
+        +endDate: string|null
+        +picFilter: string
+        +page: number
+        +pageSize: number
+    }
+
+    class Post {
+        +mid: string
+        +text: string
+        +createdAt: string
+        +pics: string[]
+        +localPics: string[]
+        +reposts: number
+        +comments: number
+        +likes: number
+        +source: string
+        +isRetweet: boolean
+        +retweetedData: object|null
+        +fetchedAt: number
+    }
+
+    class SearchResultPost {
+        +uid: string
+        +userName: string
+        +userAvatar: string
+    }
+
+    Post <|-- SearchResultPost
+
+    class Subscription {
+        +uid: string
+        +name: string
+        +avatar: string
+        +postCount: number
+        +lastFetch: string|null
+        +intervalMinutes: number
+        +createdAt: string
+        +fetchStatus: FetchStatus
+    }
+
+    class PaginationState {
+        +page: number
+        +pageSize: number
+        +total: number
+        +totalPages: number
+    }

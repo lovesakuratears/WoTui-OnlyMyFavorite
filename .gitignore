@@ -1,6 +1,24 @@
+# Dependencies
 node_modules/
-data/users/
-data/cookies.json
-data/session/
+
+# User data (private, contains Weibo content)
+data/
+
+# Logs
 *.log
 logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
