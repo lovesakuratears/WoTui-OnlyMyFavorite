@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>微博归档器 - Demo</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://unpkg.com/dayjs@1.11.10/dayjs.min.js"></script>
+  <script src="https://unpkg.com/dayjs@1.11.10/plugin/relativeTime.js"></script>
+  <script src="https://unpkg.com/dayjs@1.11.10/locale/zh-cn.js"></script>
+  <style>
+/* ============================================================
+   styles.css — 微博归档器样式表
+   风格：参考微博官网红橙色系，响应式布局
+   ============================================================ */
+:root {
+  --color-primary: #eb4132;
+  --color-primary-dark: #c73227;
+  --color-primary-light: #ff6b5b;
+  --color-orange: #f97d0e;
+  --color-bg: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-border: #e8e8e8;
+  --color-text: #222222;
+  --color-text-secondary: #888888;
+  --color-text-hint: #aaaaaa;
+  --color-sidebar-bg: #ffffff;
+  --color-navbar-bg: #eb4132;
+  --color-navbar-text: #ffffff;
+  --color-success: #52c41a;
+  --color-error: #ff4d4f;
+  --color-warning: #fa8c16;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-sm: 0 1px 4px rgba(0,0,0,0.07);
+  --shadow-md: 0 4px 16px rgba(0,0,0,0.10);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.18);
+  --transition: 0.18s ease;
+  --sidebar-width: 260px;
+  --navbar-height: 56px;
+  --footer-height: 38px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, #root { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  color: var(--color-text);
+  background: var(--color-bg);
+  line-height: 1.6;
+  overflow: hidden;
+}
+a { color: var(--color-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.app-layout { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.navbar {
+  display: flex; align-items: center; justify-content: space-between;
+  height: var(--navbar-height); background: var(--color-navbar-bg);
+  padding: 0 20px; box-shadow: 0 2px 8px rgba(235,65,50,0.3);
+  flex-shrink: 0; z-index: 100;
+}
+.navbar-brand { display: flex; align-items: center; gap: 8px; color: var(--color-navbar-text); }
+.navbar-logo { font-size: 24px; }
+.navbar-title { font-size: 20px; font-weight: 700; color: #fff; letter-spacing: 0.5px; }
+.navbar-actions { display: flex; align-items: center; gap: 10px; }
+.main-content { display: flex; flex: 1; overflow: hidden; }
+.sidebar {
+  width: var(--sidebar-width); background: var(--color-sidebar-bg);
+  border-right: 1px solid var(--color-border);
+  display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden;
+}
+.sidebar-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 10px; font-weight: 600; font-size: 13px;
+  color: var(--color-text-secondary); border-bottom: 1px solid var(--color-border);
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.sidebar-count-badge {
+  background: var(--color-primary); color: #fff; border-radius: 20px;
+  padding: 1px 8px; font-size: 11px; font-weight: 700;
+}
+.sidebar-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+.sidebar-list::-webkit-scrollbar { width: 4px; }
+.sidebar-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 4px; }
+.sidebar-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  flex: 1; padding: 32px 20px; gap: 12px; color: var(--color-text-hint); text-align: center;
+}
+.sidebar-item {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  cursor: pointer; transition: background var(--transition);
+  border-bottom: 1px solid transparent; position: relative;
+}
+.sidebar-item:hover { background: #fff5f4; }
+.sidebar-item.active { background: #fff0ee; border-left: 3px solid var(--color-primary); }
+.sidebar-avatar {
+  width: 40px; height: 40px; border-radius: 50%; object-fit: cover;
+  flex-shrink: 0; border: 2px solid var(--color-border);
+}
+.sidebar-info { flex: 1; min-width: 0; }
+.sidebar-name {
+  font-weight: 500; font-size: 13px; display: flex; align-items: center;
+  gap: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-uid { font-size: 11px; color: var(--color-text-secondary); }
+.sidebar-count { font-size: 11px; color: var(--color-text-hint); }
+.sidebar-actions { display: flex; gap: 4px; opacity: 0; transition: opacity var(--transition); }
+.sidebar-item:hover .sidebar-actions { opacity: 1; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.status-dot.idle { background: var(--color-success); }
+.status-dot.fetching { background: var(--color-warning); animation: pulse 1.2s infinite; }
+.status-dot.error { background: var(--color-error); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.feed-area { flex: 1; overflow-y: auto; background: var(--color-bg); padding: 0; }
+.feed-area::-webkit-scrollbar { width: 6px; }
+.feed-area::-webkit-scrollbar-thumb { background: #ccc; border-radius: 4px; }
+.feed-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; gap: 16px; color: var(--color-text-secondary); text-align: center; padding: 40px 20px;
+}
+.feed-empty-icon { font-size: 64px; opacity: 0.3; }
+.feed-empty h2 { font-size: 22px; color: var(--color-text); }
+.feed-empty p { color: var(--color-text-secondary); max-width: 320px; }
+.feed-demo-hint {
+  margin-top: 16px; padding-top: 16px; border-top: 1px dashed var(--color-border);
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  color: var(--color-text-hint); font-size: 12px;
+}
+.feed-content { max-width: 720px; margin: 0 auto; padding: 16px; }
+.feed-user-bar {
+  display: flex; align-items: center; gap: 14px; background: var(--color-surface);
+  border-radius: var(--radius-md); padding: 16px 20px; margin-bottom: 12px; box-shadow: var(--shadow-sm);
+}
+.feed-user-avatar {
+  width: 60px; height: 60px; border-radius: 50%; object-fit: cover;
+  border: 3px solid var(--color-primary); flex-shrink: 0;
+}
+.feed-user-info { flex: 1; }
+.feed-user-info h2 { font-size: 18px; font-weight: 700; }
+.feed-user-uid { font-size: 12px; color: var(--color-text-secondary); }
+.feed-user-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.status-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-radius: var(--radius-sm); margin-bottom: 12px; font-size: 13px;
+}
+.status-bar.status-fetching { background: #fff7e6; border: 1px solid #ffd591; color: #874d00; }
+.status-bar.status-success { background: #f6ffed; border: 1px solid #b7eb8f; color: #135200; }
+.status-bar.status-error { background: #fff2f0; border: 1px solid #ffccc7; color: #a8071a; }
+.status-bar.status-idle { background: #f0f0f0; border: 1px solid #ddd; color: #555; }
+.status-time { margin-left: auto; font-size: 11px; opacity: 0.7; }
+.posts-list { display: flex; flex-direction: column; gap: 12px; }
+.post-card {
+  background: var(--color-surface); border-radius: var(--radius-md); padding: 16px 20px;
+  box-shadow: var(--shadow-sm); transition: box-shadow var(--transition); border: 1px solid var(--color-border);
+}
+.post-card:hover { box-shadow: var(--shadow-md); }
+.post-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+.post-avatar {
+  width: 44px; height: 44px; border-radius: 50%; object-fit: cover;
+  flex-shrink: 0; border: 2px solid var(--color-border);
+}
+.post-user-info { flex: 1; display: flex; flex-direction: column; }
+.post-username { font-weight: 600; font-size: 14px; color: var(--color-text); }
+.post-time { font-size: 12px; color: var(--color-text-hint); }
+.post-weibo-link { font-size: 16px; opacity: 0.4; transition: opacity var(--transition); text-decoration: none; }
+.post-weibo-link:hover { opacity: 1; }
+.post-body { margin-bottom: 12px; }
+.post-text { font-size: 15px; line-height: 1.8; color: var(--color-text); white-space: pre-wrap; word-break: break-word; margin-bottom: 10px; }
+.post-footer { display: flex; gap: 24px; padding-top: 10px; border-top: 1px solid #f5f5f5; }
+.post-action { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--color-text-secondary); }
+.action-icon { font-size: 14px; }
+.pic-grid { display: grid; gap: 4px; border-radius: var(--radius-sm); overflow: hidden; max-width: 540px; }
+.pic-grid-1 { grid-template-columns: 1fr; max-width: 360px; }
+.pic-grid-2 { grid-template-columns: 1fr 1fr; }
+.pic-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+.pic-grid-4 { grid-template-columns: 1fr 1fr 1fr; }
+.pic-item { position: relative; overflow: hidden; cursor: pointer; background: #f0f0f0; }
+.pic-grid-1 .pic-item { border-radius: var(--radius-sm); }
+.pic-grid-1 .pic-item img { width: 100%; height: auto; max-height: 360px; object-fit: cover; display: block; }
+.pic-grid-2 .pic-item, .pic-grid-3 .pic-item, .pic-grid-4 .pic-item { aspect-ratio: 1 / 1; }
+.pic-grid-2 .pic-item img, .pic-grid-3 .pic-item img, .pic-grid-4 .pic-item img {
+  width: 100%; height: 100%; object-fit: cover; display: block; transition: transform 0.22s ease;
+}
+.pic-item:hover img { transform: scale(1.05); }
+.pic-more {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.45); color: #fff;
+  font-size: 22px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+}
+.lightbox-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.88);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 9999; animation: fadeIn 0.18s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.lightbox-container {
+  position: relative; max-width: 90vw; max-height: 90vh;
+  display: flex; align-items: center; justify-content: center;
+}
+.lightbox-img { max-width: 90vw; max-height: 85vh; object-fit: contain; border-radius: var(--radius-sm); box-shadow: var(--shadow-lg); display: block; }
+.lightbox-close {
+  position: absolute; top: -40px; right: -10px; background: rgba(255,255,255,0.15);
+  color: #fff; border: none; border-radius: 50%; width: 32px; height: 32px;
+  font-size: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition);
+}
+.lightbox-close:hover { background: rgba(255,255,255,0.3); }
+.lightbox-nav {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(255,255,255,0.15); color: #fff; border: none; border-radius: 50%;
+  width: 44px; height: 44px; font-size: 28px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition); user-select: none;
+}
+.lightbox-nav:hover { background: rgba(255,255,255,0.3); }
+.lightbox-prev { left: -56px; }
+.lightbox-next { right: -56px; }
+.lightbox-counter {
+  position: absolute; bottom: -36px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.7); font-size: 13px;
+}
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 1000; animation: fadeIn 0.18s ease;
+}
+.modal { background: var(--color-surface); border-radius: var(--radius-lg); width: 420px; max-width: 95vw; box-shadow: var(--shadow-lg); overflow: hidden; }
+.modal-large { width: 560px; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px 14px; border-bottom: 1px solid var(--color-border); }
+.modal-header h2 { font-size: 17px; font-weight: 700; }
+.modal-close {
+  background: none; border: none; font-size: 18px; cursor: pointer; color: var(--color-text-secondary);
+  width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; transition: background var(--transition);
+}
+.modal-close:hover { background: #f0f0f0; }
+.modal-body { padding: 18px 22px; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; margin-bottom: 14px; }
+.form-group label { font-size: 13px; font-weight: 500; color: var(--color-text); }
+.form-input, .form-select, .form-textarea {
+  width: 100%; padding: 9px 12px; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  font-size: 14px; font-family: inherit; color: var(--color-text); background: #fff;
+  transition: border-color var(--transition), box-shadow var(--transition); outline: none;
+}
+.form-input:focus, .form-select:focus, .form-textarea:focus {
+  border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(235,65,50,0.12);
+}
+.form-textarea { resize: vertical; min-height: 90px; }
+.form-hint { font-size: 11px; color: var(--color-text-hint); line-height: 1.4; }
+.form-error { padding: 8px 12px; background: #fff2f0; border: 1px solid #ffccc7; border-radius: var(--radius-sm); color: var(--color-error); font-size: 13px; }
+.form-success { padding: 8px 12px; background: #f6ffed; border: 1px solid #b7eb8f; border-radius: var(--radius-sm); color: #135200; font-size: 13px; }
+.settings-section h3 { font-size: 15px; margin-bottom: 12px; }
+.settings-hint { background: #f9f9f9; border: 1px solid #eee; border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px; font-size: 13px; line-height: 1.8; }
+.settings-hint ol { padding-left: 18px; }
+.settings-hint code { background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-family: monospace; color: var(--color-primary); }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 8px 18px; border-radius: var(--radius-sm); font-size: 13px; font-weight: 500;
+  border: none; cursor: pointer; transition: all var(--transition); white-space: nowrap;
+  text-decoration: none; font-family: inherit;
+}
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.btn-primary { background: var(--color-primary); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--color-primary-dark); }
+.btn-secondary { background: #f5f5f5; color: var(--color-text); border: 1px solid var(--color-border); }
+.btn-secondary:hover:not(:disabled) { background: #ebebeb; }
+.btn-add { font-size: 13px; padding: 7px 16px; background: rgba(255,255,255,0.2); color: #fff; border: 1.5px solid rgba(255,255,255,0.5); }
+.btn-add:hover { background: rgba(255,255,255,0.35); }
+.btn-toggle { padding: 5px 12px; border-radius: 20px; font-size: 12px; border: 1.5px solid rgba(255,255,255,0.5); background: transparent; color: rgba(255,255,255,0.85); cursor: pointer; transition: all var(--transition); font-family: inherit; }
+.btn-toggle:hover, .btn-toggle.active { background: rgba(255,255,255,0.2); color: #fff; }
+.icon-btn { background: none; border: none; cursor: pointer; padding: 4px 6px; border-radius: var(--radius-sm); font-size: 15px; transition: background var(--transition); line-height: 1; }
+.icon-btn:hover { background: #f0f0f0; }
+.icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.settings-btn { font-size: 20px; color: rgba(255,255,255,0.85); padding: 5px 8px; }
+.settings-btn:hover { background: rgba(255,255,255,0.15); }
+.delete-btn:hover { color: var(--color-error); background: #fff2f0; }
+.fetch-btn:hover { color: var(--color-primary); background: #fff5f4; }
+.loading { display: flex; flex-direction: column; align-items: center; padding: 60px 20px; color: var(--color-text-secondary); gap: 12px; }
+.loading-spinner { width: 36px; height: 36px; border: 3px solid var(--color-border); border-top-color: var(--color-primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+.feed-no-posts { text-align: center; padding: 60px 20px; color: var(--color-text-secondary); display: flex; flex-direction: column; align-items: center; gap: 16px; }
+.load-more { display: flex; justify-content: center; padding: 20px 0; }
+.feed-stats { text-align: center; padding: 12px 0 24px; font-size: 12px; color: var(--color-text-hint); }
+.mock-badge { background: #ffd591; color: #874d00; padding: 1px 6px; border-radius: 3px; font-size: 11px; margin-left: 4px; }
+.status-footer { display: flex; align-items: center; justify-content: space-between; height: var(--footer-height); background: var(--color-surface); border-top: 1px solid var(--color-border); padding: 0 20px; font-size: 12px; color: var(--color-text-secondary); flex-shrink: 0; }
+.toast { position: fixed; bottom: 60px; left: 50%; transform: translateX(-50%); background: rgba(30,30,30,0.9); color: #fff; padding: 10px 22px; border-radius: 22px; font-size: 13px; z-index: 9998; animation: slideUp 0.2s ease; pointer-events: none; white-space: nowrap; }
+@keyframes slideUp { from { opacity: 0; transform: translateX(-50%) translateY(10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+.spinner { display: inline-block; animation: spin 1s linear infinite; }
+@media (max-width: 768px) {
+  :root { --sidebar-width: 200px; }
+  .navbar-title { font-size: 16px; }
+  .feed-content { padding: 10px; }
+}
+.demo-banner {
+  background: linear-gradient(135deg, #ff6b35, #eb4132);
+  color: white;
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+.demo-banner a { color: rgba(255,255,255,0.9); text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    dayjs.extend(dayjs_plugin_relativeTime);
+    dayjs.locale('zh-cn');
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ── Mock 数据 ─────────────────────────────────────────────────────────────
+    const MOCK_USERS = {
+      '1234567890': {
+        uid: '1234567890',
+        name: '某某明星',
+        avatar: 'https://picsum.photos/seed/star1/80/80',
+        bio: '演员 | 歌手 | 导演',
+        followers: 52000000,
+        following: 348,
+        weibos: 3847,
+      },
+      '9876543210': {
+        uid: '9876543210',
+        name: '知名博主',
+        avatar: 'https://picsum.photos/seed/blogger1/80/80',
+        bio: '记录生活，分享美好 📷',
+        followers: 8200000,
+        following: 1023,
+        weibos: 12436,
+      },
+      '5555555555': {
+        uid: '5555555555',
+        name: '科技达人',
+        avatar: 'https://picsum.photos/seed/tech1/80/80',
+        bio: '关注科技 · AI · 数码 | 前BAT工程师',
+        followers: 3100000,
+        following: 210,
+        weibos: 5621,
+      },
+    };
+
+    const now = dayjs();
+    const MOCK_POSTS = {
+      '1234567890': [
+        {
+          mid: 'mock_001',
+          text: '今天参加了一个非常特别的活动，感谢主办方的邀请！现场气氛超级棒，遇到了很多老朋友，也认识了不少新朋友。人生就是这样，相遇相知，每一段缘分都值得珍惜 ❤️',
+          createdAt: now.subtract(2, 'hour').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/p001a/600/400',
+            'https://picsum.photos/seed/p001b/600/400',
+            'https://picsum.photos/seed/p001c/600/400',
+          ],
+          localPics: [],
+          reposts: 12400,
+          comments: 8763,
+          likes: 234500,
+        },
+        {
+          mid: 'mock_002',
+          text: '新专辑《星光》正式发布！这张专辑承载了我过去两年的心路历程，每一首歌都是真实的情感流露。感谢所有支持我的朋友们，你们是我前进的动力 🎵🎶\n\n#新专辑 #星光 #音乐',
+          createdAt: now.subtract(1, 'day').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/p002a/800/800',
+          ],
+          localPics: [],
+          reposts: 45600,
+          comments: 23100,
+          likes: 892000,
+        },
+        {
+          mid: 'mock_003',
+          text: '周末的午后，阳光正好。窗外的花开了，心情也跟着好起来了。有时候生活就是这么简单，一束阳光，一杯咖啡，就足够了 ☀️',
+          createdAt: now.subtract(3, 'day').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/p003a/400/600',
+            'https://picsum.photos/seed/p003b/400/600',
+            'https://picsum.photos/seed/p003c/400/600',
+            'https://picsum.photos/seed/p003d/400/600',
+            'https://picsum.photos/seed/p003e/400/600',
+            'https://picsum.photos/seed/p003f/400/600',
+          ],
+          localPics: [],
+          reposts: 3200,
+          comments: 4510,
+          likes: 128000,
+        },
+        {
+          mid: 'mock_004',
+          text: '刚从巴黎回来，这次时装周真的超级累但也超级充实！看了十几场秀，遇到了很多时尚圈的朋友。最喜欢的还是那些有故事的设计，每一件衣服背后都是设计师的心血与灵感 🗼✨',
+          createdAt: now.subtract(5, 'day').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/p004a/600/800',
+            'https://picsum.photos/seed/p004b/600/800',
+          ],
+          localPics: [],
+          reposts: 8900,
+          comments: 5630,
+          likes: 315000,
+        },
+        {
+          mid: 'mock_005',
+          text: '感谢大家对我新电影的支持！《归途》上映首周票房突破5亿，这是我们整个剧组努力的结果。感谢导演，感谢每一位演员，感谢所有幕后工作人员，也感谢每一位走进电影院的观众 🎬',
+          createdAt: now.subtract(8, 'day').toISOString(),
+          pics: [],
+          localPics: [],
+          reposts: 67200,
+          comments: 34800,
+          likes: 1230000,
+        },
+      ],
+      '9876543210': [
+        {
+          mid: 'mock_b001',
+          text: '探店 | 藏在胡同里的这家咖啡馆，真的太有质感了！老板是一个热爱艺术的设计师，店里每一件摆设都是他精心挑选的。单品咖啡烘焙得刚刚好，坐下来半天就这样过去了 ☕',
+          createdAt: now.subtract(3, 'hour').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/b001a/600/400',
+            'https://picsum.photos/seed/b001b/600/400',
+            'https://picsum.photos/seed/b001c/600/400',
+            'https://picsum.photos/seed/b001d/600/400',
+          ],
+          localPics: [],
+          reposts: 2300,
+          comments: 1870,
+          likes: 45600,
+        },
+        {
+          mid: 'mock_b002',
+          text: '最近迷上了摄影，用胶片机拍了一批照片。胶片的质感和数码完全不同，每一张都充满了不确定性，但这种不确定性本身就是一种魅力。把最喜欢的几张分享给大家 📷',
+          createdAt: now.subtract(2, 'day').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/b002a/800/600',
+            'https://picsum.photos/seed/b002b/800/600',
+          ],
+          localPics: [],
+          reposts: 4500,
+          comments: 2100,
+          likes: 87000,
+        },
+        {
+          mid: 'mock_b003',
+          text: '今天聊一个有趣的话题：为什么现代人越来越孤独？社交媒体让我们连接了整个世界，却和身边的人越来越疏远。分享一篇我最近读到的文章，很有启发性。\n\n[转]《当我们谈论孤独时，我们在谈论什么》',
+          createdAt: now.subtract(4, 'day').toISOString(),
+          pics: [],
+          localPics: [],
+          reposts: 12300,
+          comments: 8760,
+          likes: 234000,
+        },
+      ],
+      '5555555555': [
+        {
+          mid: 'mock_t001',
+          text: '🤖 OpenAI 刚刚发布的新模型，实测体验：\n\n1. 推理能力大幅提升，复杂数学题基本不错\n2. 代码生成质量很高，特别是复杂算法\n3. 上下文窗口扩大到200K，处理长文档更流畅\n4. 但是... 幻觉问题仍然存在，不能完全相信\n\n总体来说是一个显著的进步，但还没到AGI的程度',
+          createdAt: now.subtract(1, 'hour').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/t001a/800/500',
+          ],
+          localPics: [],
+          reposts: 8900,
+          comments: 3420,
+          likes: 67800,
+        },
+        {
+          mid: 'mock_t002',
+          text: '分享一个我最近整理的 AI 工具清单，涵盖了文字、图片、视频、代码等各个领域，每个都亲测过。\n\n💡 文字：Claude / ChatGPT / Gemini\n🎨 图片：Midjourney / DALL-E / Stable Diffusion\n🎬 视频：Runway / Sora / Pika\n💻 代码：GitHub Copilot / Cursor / Windsurf\n\n完整清单在评论区，欢迎补充～',
+          createdAt: now.subtract(2, 'day').toISOString(),
+          pics: [],
+          localPics: [],
+          reposts: 23400,
+          comments: 5670,
+          likes: 189000,
+        },
+        {
+          mid: 'mock_t003',
+          text: '写了一篇关于 Rust 语言的深度分析，为什么它在系统编程领域越来越受欢迎？\n\n核心优势：\n• 内存安全，无垃圾回收\n• 性能接近 C/C++\n• 并发安全\n• 现代化工具链\n\n全文链接在评论区',
+          createdAt: now.subtract(6, 'day').toISOString(),
+          pics: [
+            'https://picsum.photos/seed/t003a/700/400',
+            'https://picsum.photos/seed/t003b/700/400',
+            'https://picsum.photos/seed/t003c/700/400',
+          ],
+          localPics: [],
+          reposts: 5600,
+          comments: 2340,
+          likes: 78900,
+        },
+      ],
+    };
+
+    const INITIAL_SUBS = [
+      { uid: '1234567890', intervalMinutes: 60, postCount: 5, addedAt: now.subtract(7, 'day').toISOString() },
+      { uid: '9876543210', intervalMinutes: 120, postCount: 3, addedAt: now.subtract(3, 'day').toISOString() },
+      { uid: '5555555555', intervalMinutes: 30, postCount: 3, addedAt: now.subtract(1, 'day').toISOString() },
+    ];
+
+    // ── 工具函数 ──────────────────────────────────────────────────────────────
+    function formatTime(timeStr) {
+      if (!timeStr) return '未知时间';
+      const d = dayjs(timeStr);
+      if (!d.isValid()) return timeStr;
+      const diff = dayjs().diff(d, 'hour');
+      if (diff < 24) return d.fromNow();
+      if (diff < 24 * 7) return d.format('MM-DD HH:mm');
+      return d.format('YYYY-MM-DD HH:mm');
+    }
+    function formatCount(n) {
+      if (!n && n !== 0) return '0';
+      if (n >= 10000) return (n / 10000).toFixed(1) + '万';
+      return String(n);
+    }
+    function extractUid(input) {
+      if (!input) return null;
+      const trimmed = input.trim();
+      if (/^\d{6,}$/.test(trimmed)) return trimmed;
+      const urlMatch = trimmed.match(/weibo\.com\/(?:u\/)?(\d{6,})/);
+      if (urlMatch) return urlMatch[1];
+      return null;
+    }
+
+    // ── Lightbox ──────────────────────────────────────────────────────────────
+    function Lightbox({ images, startIndex, onClose }) {
+      const [current, setCurrent] = useState(startIndex || 0);
+      const prev = useCallback(() => setCurrent(c => (c - 1 + images.length) % images.length), [images.length]);
+      const next = useCallback(() => setCurrent(c => (c + 1) % images.length), [images.length]);
+      useEffect(() => {
+        const h = (e) => {
+          if (e.key === 'Escape') onClose();
+          if (e.key === 'ArrowLeft') prev();
+          if (e.key === 'ArrowRight') next();
+        };
+        window.addEventListener('keydown', h);
+        return () => window.removeEventListener('keydown', h);
+      }, [onClose, prev, next]);
+      if (!images || images.length === 0) return null;
+      return (
+        <div className="lightbox-overlay" onClick={onClose}>
+          <div className="lightbox-container" onClick={e => e.stopPropagation()}>
+            <button className="lightbox-close" onClick={onClose} title="关闭 (ESC)">✕</button>
+            <img className="lightbox-img" src={images[current]} alt={`图片 ${current + 1}`}
+              onError={e => { e.target.src = 'https://picsum.photos/seed/err/400/300'; }} />
+            {images.length > 1 && <>
+              <button className="lightbox-nav lightbox-prev" onClick={prev} title="上一张 (←)">‹</button>
+              <button className="lightbox-nav lightbox-next" onClick={next} title="下一张 (→)">›</button>
+              <div className="lightbox-counter">{current + 1} / {images.length}</div>
+            </>}
+          </div>
+        </div>
+      );
+    }
+
+    // ── 图片宫格 ──────────────────────────────────────────────────────────────
+    function PicGrid({ pics, onImgClick }) {
+      if (!pics || pics.length === 0) return null;
+      const gridClass = pics.length === 1 ? 'pic-grid-1' : pics.length === 2 ? 'pic-grid-2' : pics.length === 3 ? 'pic-grid-3' : 'pic-grid-4';
+      return (
+        <div className={`pic-grid ${gridClass}`}>
+          {pics.slice(0, 9).map((pic, i) => (
+            <div key={i} className="pic-item" onClick={() => onImgClick(i)} title="点击查看大图">
+              <img src={pic} alt={`图片${i + 1}`} loading="lazy"
+                onError={e => { e.target.src = 'https://picsum.photos/seed/err/300/300'; }} />
+              {i === 8 && pics.length > 9 && <div className="pic-more">+{pics.length - 9}</div>}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── 微博卡片 ──────────────────────────────────────────────────────────────
+    function PostCard({ post, profile, onLightbox }) {
+      const [lbIdx, setLbIdx] = useState(null);
+      const uid = profile ? profile.uid : '';
+      const handleImg = (idx) => {
+        if (onLightbox) onLightbox(post.pics, idx);
+        else setLbIdx(idx);
+      };
+      return (
+        <div className="post-card">
+          <div className="post-header">
+            <img className="post-avatar"
+              src={profile && profile.avatar ? profile.avatar : `https://picsum.photos/seed/${uid}/48/48`}
+              alt="头像" onError={e => { e.target.src = `https://picsum.photos/seed/${uid}/48/48`; }} />
+            <div className="post-user-info">
+              <span className="post-username">{profile ? profile.name : `用户 ${uid}`}</span>
+              <span className="post-time">{formatTime(post.createdAt)}</span>
+            </div>
+            {uid && uid !== 'demo' && (
+              <a className="post-weibo-link" href={`https://weibo.com/u/${uid}`} target="_blank" rel="noreferrer" title="跳转微博主页">🔗</a>
+            )}
+          </div>
+          <div className="post-body">
+            <p className="post-text">{post.text || '（无文字内容）'}</p>
+            <PicGrid pics={post.pics} onImgClick={handleImg} />
+          </div>
+          <div className="post-footer">
+            <span className="post-action"><span className="action-icon">🔁</span> {formatCount(post.reposts)}</span>
+            <span className="post-action"><span className="action-icon">💬</span> {formatCount(post.comments)}</span>
+            <span className="post-action"><span className="action-icon">❤️</span> {formatCount(post.likes)}</span>
+          </div>
+          {lbIdx !== null && (
+            <Lightbox images={post.pics} startIndex={lbIdx} onClose={() => setLbIdx(null)} />
+          )}
+        </div>
+      );
+    }
+
+    // ── 添加订阅弹窗 ──────────────────────────────────────────────────────────
+    function AddModal({ onClose, onSuccess }) {
+      const [input, setInput] = useState('');
+      const [interval, setIntervalVal] = useState('60');
+      const [error, setError] = useState('');
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        const uid = extractUid(input);
+        if (!uid) { setError('请输入有效的微博 UID 或主页 URL'); return; }
+        onSuccess(uid, parseInt(interval));
+        onClose();
+      };
+      return (
+        <div className="modal-overlay" onClick={onClose}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>添加订阅</h2>
+              <button className="modal-close" onClick={onClose}>✕</button>
+            </div>
+            <form className="modal-body" onSubmit={handleSubmit}>
+              <div className="form-group">
+                <label>微博用户 UID 或主页 URL</label>
+                <input type="text" className="form-input"
+                  placeholder="例：1234567890 或 https://weibo.com/u/1234567890"
+                  value={input} onChange={e => setInput(e.target.value)} autoFocus />
+                <span className="form-hint">支持纯数字 UID 或粘贴微博主页链接，自动提取 UID</span>
+              </div>
+              <div className="form-group">
+                <label>抓取间隔</label>
+                <select className="form-select" value={interval} onChange={e => setIntervalVal(e.target.value)}>
+                  <option value="15">每 15 分钟</option>
+                  <option value="30">每 30 分钟</option>
+                  <option value="60">每 1 小时</option>
+                  <option value="120">每 2 小时</option>
+                  <option value="360">每 6 小时</option>
+                  <option value="720">每 12 小时</option>
+                  <option value="1440">每天</option>
+                </select>
+              </div>
+              {error && <div className="form-error">{error}</div>}
+              <div className="form-hint" style={{marginBottom:8, padding:'8px 12px', background:'#fff7e6', borderRadius:6, border:'1px solid #ffd591', color:'#874d00'}}>
+                📦 Demo 模式：已预置 3 个示例用户数据。输入任意 UID 都可以添加（将显示空内容）。
+              </div>
+              <div className="modal-footer">
+                <button type="button" className="btn btn-secondary" onClick={onClose}>取消</button>
+                <button type="submit" className="btn btn-primary">开始订阅</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    // ── 设置弹窗 ──────────────────────────────────────────────────────────────
+    function SettingsModal({ onClose }) {
+      return (
+        <div className="modal-overlay" onClick={onClose}>
+          <div className="modal modal-large" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>⚙️ 设置</h2>
+              <button className="modal-close" onClick={onClose}>✕</button>
+            </div>
+            <div className="modal-body">
+              <div className="settings-section">
+                <h3>🍪 微博登录 Cookie（正式版功能）</h3>
+                <div className="settings-hint">
+                  <strong>如何获取 Cookie：</strong>
+                  <ol>
+                    <li>在浏览器中打开 <a href="https://weibo.com" target="_blank" rel="noreferrer">weibo.com</a> 并登录</li>
+                    <li>按 F12 打开开发者工具 → Network 标签</li>
+                    <li>刷新页面，找到任意对 weibo.com 的请求</li>
+                    <li>在 Request Headers 中找到 <code>Cookie</code> 字段</li>
+                    <li>复制整个 Cookie 值粘贴到下方</li>
+                  </ol>
+                </div>
+                <div className="form-group">
+                  <label>Cookie 字符串</label>
+                  <textarea className="form-textarea" placeholder="粘贴微博 Cookie..." rows={5} />
+                </div>
+                <div style={{padding:'10px 14px', background:'#e6f7ff', border:'1px solid #91d5ff', borderRadius:6, fontSize:13, color:'#0050b3', marginBottom:12}}>
+                  💡 Demo 模式下 Cookie 不会实际使用。正式运行时，需要启动 Node.js 后端服务（npm start），Cookie 将被注入 Playwright 浏览器实例中访问微博。
+                </div>
+                <div className="modal-footer">
+                  <button className="btn btn-secondary" onClick={onClose}>关闭</button>
+                  <button className="btn btn-primary" onClick={() => { alert('Demo 模式：Cookie 已模拟保存！'); onClose(); }}>保存 Cookie</button>
+                </div>
+              </div>
+              <div className="settings-section" style={{marginTop:16, borderTop:'1px solid #eee', paddingTop:16}}>
+                <h3>🚀 正式版启动方式</h3>
+                <div className="settings-hint" style={{fontFamily:'monospace', fontSize:12, lineHeight:'2'}}>
+                  <div>cd weibo-archiver</div>
+                  <div>npm install</div>
+                  <div>npx playwright install chromium</div>
+                  <div>npm start</div>
+                  <div style={{marginTop:8, fontFamily:'sans-serif', color:'#666'}}>然后访问 http://localhost:3000</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── 侧边栏条目 ────────────────────────────────────────────────────────────
+    function SidebarItem({ sub, profile, isActive, onSelect, onDelete, isFetching }) {
+      return (
+        <div className={`sidebar-item ${isActive ? 'active' : ''}`} onClick={() => onSelect(sub.uid)}>
+          <img className="sidebar-avatar"
+            src={profile && profile.avatar ? profile.avatar : `https://picsum.photos/seed/${sub.uid}/40/40`}
+            alt="头像" onError={e => { e.target.src = `https://picsum.photos/seed/${sub.uid}/40/40`; }} />
+          <div className="sidebar-info">
+            <div className="sidebar-name">
+              {profile ? profile.name : `用户 ${sub.uid}`}
+              <span className={`status-dot ${isFetching ? 'fetching' : 'idle'}`} title={isFetching ? '同步中' : '正常'} />
+            </div>
+            <div className="sidebar-uid">UID: {sub.uid}</div>
+            {sub.postCount > 0 && <div className="sidebar-count">{sub.postCount} 条归档</div>}
+          </div>
+          <div className="sidebar-actions" onClick={e => e.stopPropagation()}>
+            <button className="icon-btn fetch-btn" title="立即同步（Demo）" onClick={e => { e.stopPropagation(); }}>🔄</button>
+            <button className="icon-btn delete-btn" title="删除订阅"
+              onClick={e => { e.stopPropagation(); onDelete(sub.uid); }}>🗑️</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ── 主应用 ────────────────────────────────────────────────────────────────
+    function App() {
+      const [subs, setSubs] = useState(INITIAL_SUBS);
+      const [activeUid, setActiveUid] = useState('1234567890');
+      const [showAdd, setShowAdd] = useState(false);
+      const [showSettings, setShowSettings] = useState(false);
+      const [lightbox, setLightbox] = useState({ open: false, images: [], idx: 0 });
+      const [toast, setToast] = useState('');
+
+      const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
+
+      const activeSub = subs.find(s => s.uid === activeUid);
+      const activeProfile = MOCK_USERS[activeUid] || null;
+      const activePosts = (MOCK_POSTS[activeUid] || []);
+
+      const handleAdd = (uid, intervalMinutes) => {
+        if (subs.find(s => s.uid === uid)) {
+          showToast(`UID ${uid} 已存在订阅`); return;
+        }
+        setSubs(prev => [...prev, { uid, intervalMinutes, postCount: (MOCK_POSTS[uid] || []).length, addedAt: new Date().toISOString() }]);
+        setActiveUid(uid);
+        showToast(`✅ 已添加订阅 UID=${uid}，正在执行首次全量保存...`);
+      };
+
+      const handleDelete = (uid) => {
+        if (!window.confirm(`确定删除 UID=${uid} 的订阅？`)) return;
+        setSubs(prev => prev.filter(s => s.uid !== uid));
+        if (activeUid === uid) setActiveUid(subs.find(s => s.uid !== uid)?.uid || null);
+        showToast('✅ 已删除订阅');
+      };
+
+      return (
+        <div className="app-layout">
+          <div className="demo-banner">
+            📦 这是 <strong>Demo 预览</strong>，展示完整 UI 和 Mock 数据。正式运行需启动 Node.js 后端（见设置）。
+            后端使用 <strong>Playwright + Chromium</strong> 模拟真实浏览器抓取微博内容并本地存储。
+          </div>
+
+          <header className="navbar">
+            <div className="navbar-brand">
+              <span className="navbar-logo">🐦</span>
+              <span className="navbar-title">微博归档器</span>
+            </div>
+            <div className="navbar-actions">
+              <span style={{color:'rgba(255,255,255,0.7)', fontSize:12, padding:'4px 10px', background:'rgba(255,255,255,0.15)', borderRadius:20}}>
+                📦 Demo 模式
+              </span>
+              <button className="btn btn-add" onClick={() => setShowAdd(true)}>+ 添加订阅</button>
+              <button className="icon-btn settings-btn" onClick={() => setShowSettings(true)} title="设置">⚙️</button>
+            </div>
+          </header>
+
+          <div className="main-content">
+            <aside className="sidebar">
+              <div className="sidebar-header">
+                <span>我的订阅</span>
+                <span className="sidebar-count-badge">{subs.length}</span>
+              </div>
+              {subs.length === 0 ? (
+                <div className="sidebar-empty">
+                  <p>还没有订阅</p>
+                  <button className="btn btn-primary" onClick={() => setShowAdd(true)}>添加第一个订阅</button>
+                </div>
+              ) : (
+                <div className="sidebar-list">
+                  {subs.map(sub => (
+                    <SidebarItem key={sub.uid} sub={sub}
+                      profile={MOCK_USERS[sub.uid] || null}
+                      isActive={activeUid === sub.uid}
+                      onSelect={setActiveUid}
+                      onDelete={handleDelete}
+                      isFetching={false}
+                    />
+                  ))}
+                </div>
+              )}
+            </aside>
+
+            <main className="feed-area">
+              {!activeUid ? (
+                <div className="feed-empty">
+                  <div className="feed-empty-icon">🐦</div>
+                  <h2>欢迎使用微博归档器</h2>
+                  <p>在左侧添加订阅，开始归档你喜欢的微博用户的内容</p>
+                  <button className="btn btn-primary" onClick={() => setShowAdd(true)}>+ 添加第一个订阅</button>
+                </div>
+              ) : (
+                <div className="feed-content">
+                  <div className="feed-user-bar">
+                    <img className="feed-user-avatar"
+                      src={activeProfile ? activeProfile.avatar : `https://picsum.photos/seed/${activeUid}/60/60`}
+                      alt="头像" onError={e => { e.target.src = `https://picsum.photos/seed/${activeUid}/60/60`; }} />
+                    <div className="feed-user-info">
+                      <h2>{activeProfile ? activeProfile.name : `用户 ${activeUid}`}</h2>
+                      <div className="feed-user-uid">
+                        UID: {activeUid}
+                        {activeProfile && <span style={{marginLeft:8, color:'#888', fontSize:11}}>{activeProfile.bio}</span>}
+                      </div>
+                      {activeProfile && (
+                        <div style={{fontSize:12, color:'#aaa', marginTop:2}}>
+                          {(activeProfile.followers / 10000).toFixed(0)}万粉丝 · 归档 {activePosts.length} 条
+                          {activeSub && <span> · 每 {activeSub.intervalMinutes} 分钟同步</span>}
+                        </div>
+                      )}
+                    </div>
+                    <div className="feed-user-actions">
+                      {activeUid && activeUid !== 'demo' && (
+                        <a className="btn btn-secondary" href={`https://weibo.com/u/${activeUid}`}
+                          target="_blank" rel="noreferrer">🔗 访问主页</a>
+                      )}
+                      <button className="btn btn-primary"
+                        onClick={() => showToast('📦 Demo 模式：实际运行时将通过 Playwright 抓取微博内容')}>
+                        🔄 立即抓取
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="status-bar status-success">
+                    <span>✅</span>
+                    <span>
+                      {activePosts.length > 0 ? `已归档 ${activePosts.length} 条微博（Mock 演示数据）` : '暂无归档内容'}
+                    </span>
+                    <span className="status-time">最后同步：{formatTime(activeSub ? activeSub.addedAt : null)}</span>
+                  </div>
+
+                  {activePosts.length === 0 ? (
+                    <div className="feed-no-posts">
+                      <p>还没有归档任何微博</p>
+                      <button className="btn btn-primary" onClick={() => showToast('📦 Demo 模式：需要启动后端服务才能实际抓取')}>
+                        🔄 立即抓取
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="posts-list">
+                        {activePosts.map(post => (
+                          <PostCard key={post.mid} post={post}
+                            profile={activeProfile}
+                            onLightbox={(imgs, idx) => setLightbox({ open: true, images: imgs, idx })} />
+                        ))}
+                      </div>
+                      <div className="feed-stats">
+                        共 {activePosts.length} 条已归档
+                        <span className="mock-badge">Mock 数据</span>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </main>
+          </div>
+
+          <footer className="status-footer">
+            <span>📦 本地数据库 | 微博归档器 v1.0</span>
+            <span>{activePosts.length > 0 ? `最近抓取: ${formatTime(activeSub?.addedAt)}` : '等待抓取...'}</span>
+            <span>{subs.length} 个订阅中</span>
+          </footer>
+
+          {showAdd && <AddModal onClose={() => setShowAdd(false)} onSuccess={handleAdd} />}
+          {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+          {lightbox.open && (
+            <Lightbox images={lightbox.images} startIndex={lightbox.idx}
+              onClose={() => setLightbox({ open: false, images: [], idx: 0 })} />
+          )}
+          {toast && <div className="toast">{toast}</div>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

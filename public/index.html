@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>微博归档器 v0.0.2</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23e6162d'/><text x='16' y='23' text-anchor='middle' font-size='20' fill='white' font-weight='bold'>微</text></svg>" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- React 18 + ReactDOM (CDN) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel Standalone（JSX 转换） -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Day.js（时间处理） -->
+  <script src="https://unpkg.com/dayjs@1/dayjs.min.js"></script>
+
+  <!-- 应用主脚本（JSX via Babel） -->
+  <script type="text/babel" src="/app.js"></script>
+</body>
+</html>

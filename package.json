@@ -1,0 +1,29 @@
+{
+  "name": "weibo-archiver",
+  "version": "0.0.2",
+  "description": "微博订阅归档器 - 本地化保存和展示微博内容",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "playwright": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "weibo",
+    "archiver",
+    "playwright"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@isomorphic-git/lightning-fs": "^4.6.2",
+    "isomorphic-git": "^1.38.1"
+  }
+}
