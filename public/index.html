@@ -3,25 +3,23 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>微博归档器 v0.2.0</title>
+  <title>WoTui · OnlyMyFavorite</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/styles.css" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%23e6162d'/><text x='16' y='23' text-anchor='middle' font-size='20' fill='white' font-weight='bold'>微</text></svg>" />
-  <!-- DNS 预解析 + 预连接，减少 CDN 首次握手延迟 -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0%25' stop-color='%23ff6b6b'/><stop offset='100%25' stop-color='%23ee0979'/></linearGradient></defs><rect width='32' height='32' rx='8' fill='url(%23g)'/><text x='16' y='22' text-anchor='middle' font-size='16' fill='white' font-weight='bold' font-family='sans-serif'>W</text></svg>" />
   <link rel="preconnect" href="https://unpkg.com" crossorigin />
   <link rel="dns-prefetch" href="https://unpkg.com" />
 </head>
 <body>
   <div id="root"></div>
 
-  <!-- React 18 + ReactDOM (CDN，固定版本避免意外升级) -->
   <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-  <!-- Babel Standalone（JSX 转换，仅开发用） -->
   <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
-  <!-- Day.js（时间处理，固定版本） -->
   <script src="https://unpkg.com/dayjs@1.11.11/dayjs.min.js"></script>
 
-  <!-- 应用主脚本（JSX via Babel） -->
   <script type="text/babel" src="/app.js"></script>
 </body>
 </html>

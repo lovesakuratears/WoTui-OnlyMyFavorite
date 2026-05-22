@@ -1,0 +1,31 @@
+# Node 依赖
+node_modules/
+
+# 日志
+logs/
+*.log
+
+# 用户真实数据（通过 volume 挂载，不打入镜像）
+# demo-data/ 会被打入镜像用于演示，真实 data/ 通过 volume 覆盖
+
+# Git
+.git/
+.gitignore
+
+# 开发工具
+.vscode/
+.idea/
+*.swp
+
+# 文档（减小镜像体积）
+docs/
+*.md
+!README.md
+
+# Windows 脚本（Docker 环境不需要）
+start.bat
+
+# 临时文件
+*.tmp
+.DS_Store
+Thumbs.db

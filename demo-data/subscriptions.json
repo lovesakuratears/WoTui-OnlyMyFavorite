@@ -1,0 +1,12 @@
+[
+  {
+    "uid": "demo_user_001",
+    "name": "示例用户 · 摄影日记",
+    "postCount": 0,
+    "intervalMinutes": 60,
+    "addedAt": "2026-01-15T08:00:00.000Z",
+    "lastFetch": "2026-05-22T06:00:00.000Z",
+    "avatar": "",
+    "fetchStatus": { "status": "success", "message": "演示数据已就绪" }
+  }
+]

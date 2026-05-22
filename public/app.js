@@ -1,9 +1,9 @@
 /* ============================================================
-   微博归档器 v0.2.0 - 前端应用
+   WoTui · OnlyMyFavorite v0.3.0 - 前端应用
+   v0.3.0: 项目改名 / 现代暗色UI重设计 / 居中布局 / Docker支持 / Demo数据
    v0.2.0: 搜索功能 / 全量强制抓取 / 分页控件 / 图片下载 / 搜索高亮
    v0.1.0: 全量只允许首次 / 已有帖子缺图片补全 / Cookie失效后图片不丢失
    v0.0.9: 后台持续抓取 / 已有图片+帖子检测跳过 / 启动时恢复断点
-   v0.0.8: 并发任务队列 / 终止抓取+断点恢复 / Cookie失效时保留已抓数据
    ============================================================ */
 
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -1003,13 +1003,13 @@ function App() {
 
   // v0.2.0：帖子分页增强 — pageSize 持久化
   const [postsPageSize, setPostsPageSize] = useState(() => {
-    return parseInt(localStorage.getItem('weibo_archiver_posts_page_size')) || 20;
+    return parseInt(localStorage.getItem('wotui_posts_page_size')) || 20;
   });
 
   // v0.2.0：订阅列表分页+排序
   const [subsPage, setSubsPage] = useState(1);
   const [subsPageSize, setSubsPageSize] = useState(() => {
-    return parseInt(localStorage.getItem('weibo_archiver_subs_page_size')) || 10;
+    return parseInt(localStorage.getItem('wotui_subs_page_size')) || 10;
   });
 
   // SSE：接收进度推送和登录结果
@@ -1160,7 +1160,7 @@ function App() {
 
   const handlePostsPageSizeChange = (newSize) => {
     setPostsPageSize(newSize);
-    localStorage.setItem('weibo_archiver_posts_page_size', String(newSize));
+    localStorage.setItem('wotui_posts_page_size', String(newSize));
     if (activeUid) loadPosts(activeUid, 1, newSize);
   };
 
@@ -1171,7 +1171,7 @@ function App() {
 
   const handleSubsPageSizeChange = (newSize) => {
     setSubsPageSize(newSize);
-    localStorage.setItem('weibo_archiver_subs_page_size', String(newSize));
+    localStorage.setItem('wotui_subs_page_size', String(newSize));
     setSubsPage(1);
   };
 
@@ -1233,18 +1233,18 @@ function App() {
     <div className="app">
       {/* 服务器离线警告 */}
       {serverDown && (
-        <div style={{
-          background: '#f44336', color: '#fff', textAlign: 'center',
-          padding: '8px 16px', fontSize: '13px', fontWeight: 500,
-        }}>
+        <div className="server-offline-bar">
           ⚠️ 无法连接服务器，请确认后端服务正在运行（node server.js）
         </div>
       )}
       {/* 顶部导航 */}
       <header className="app-header">
         <div className="header-left">
-          <span className="app-logo">微</span>
-          <span className="app-title">微博归档器 <span className="version-badge">v0.2.0</span></span>
+          <span className="app-logo">W</span>
+          <div>
+            <div className="app-title">WoTui <span className="version-badge">v0.3.0</span></div>
+            <div className="app-subtitle">OnlyMyFavorite</div>
+          </div>
         </div>
         <div className="header-right">
           {loggedIn ? (
@@ -1311,6 +1311,7 @@ function App() {
 
         {/* 主内容区 */}
         <main className="main-content">
+          <div className="content-inner">
           {!activeUid ? (
             <EmptyState loggedIn={loggedIn} onAddClick={() => setShowAddModal(true)} onLoginClick={() => setShowLoginModal(true)} />
           ) : searchMode ? (
@@ -1469,6 +1470,7 @@ function App() {
               )}
             </>
           )}
+          </div>
         </main>
       </div>
 

@@ -1,7 +1,7 @@
 {
-  "name": "weibo-archiver",
-  "version": "0.2.0",
-  "description": "微博订阅归档器 - 本地化保存和展示微博内容",
+  "name": "wotui-onlymyfavorite",
+  "version": "0.3.0",
+  "description": "WoTui - 订阅你喜欢的微博用户，本地归档帖子内容（文字+图片）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -19,6 +19,7 @@
   "keywords": [
     "weibo",
     "archiver",
+    "wotui",
     "playwright"
   ],
   "license": "MIT",

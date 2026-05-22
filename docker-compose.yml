@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  wotui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wotui-onlymyfavorite:latest
+    container_name: wotui
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      # 持久化用户数据（帖子、图片、Cookie）
+      # 首次启动使用 demo-data，后续数据写入此目录
+      - wotui_data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  wotui_data:
+    driver: local

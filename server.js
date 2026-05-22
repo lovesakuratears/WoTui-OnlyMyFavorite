@@ -1,7 +1,8 @@
 /**
- * server.js - 微博归档系统后端服务 v0.2.0
+ * server.js - WoTui · OnlyMyFavorite 后端服务 v0.3.0
  *
  * 变更记录：
+ *   v0.3.0 - 项目改名 WoTui / Docker 支持 / Demo 数据 / 现代化 UI
  *   v0.2.0 - 搜索 API / 全量强制抓取(force) / 全量覆盖更新 / 图片下载 / health 返回版本号
  *   v0.1.0 - 全量只允许首次（有数据自动增量）/ 已有帖子缺图片补全 / Cookie失效后图片不再丢失
  *   v0.0.9 - 全量抓取后台持续运行（页面关闭不影响）/ 已有图片+帖子检测跳过 / 启动时自动恢复断点任务
@@ -2101,7 +2102,7 @@ app.get('/api/profile/:uid', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
-    version: '0.2.0',
+    version: '0.3.0',
     uptime: Math.floor(process.uptime()),
     loggedIn: getLoginStatus(),
     subscriptions: readJSON(SUBSCRIPTIONS_FILE, []).length,

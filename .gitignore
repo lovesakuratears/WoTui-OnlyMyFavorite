@@ -2,6 +2,7 @@
 node_modules/
 
 # User data (private, contains Weibo content)
+# demo-data/ 是示例数据，需要提交到 Git
 data/
 
 # Logs
