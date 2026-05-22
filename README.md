@@ -20,6 +20,7 @@
 - ⏰ **微博风格时间** — 近期相对时间，远期简洁日期
 - 📡 **实时进度** — SSE 推送抓取进度
 - 🐳 **Docker 支持** — 一键容器化部署
+<img width="702" height="1188" alt="ce307fa80642d073ca8f79d40661bb97" src="https://github.com/user-attachments/assets/ffd21f2a-bd46-4623-a874-d6c654116393" />
 
 ## 🚀 快速启动
 
