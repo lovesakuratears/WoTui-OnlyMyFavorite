@@ -894,6 +894,19 @@ select option { background: var(--bg-card); color: var(--text); }
 }
 .search-main-row {
   display: flex; gap: 6px; align-items: center;
+  flex-wrap: wrap;
+}
+.search-main-row .search-input {
+  flex: 1 1 100%;
+  min-width: 0;
+}
+.search-main-row .search-scope-select {
+  flex: 1 1 90px;
+  min-width: 0;
+}
+.search-main-row .search-filter-btn,
+.search-main-row .btn {
+  flex: 0 0 auto;
 }
 .search-input {
   flex: 1;

@@ -145,6 +145,7 @@ logger.info('微博归档器 v0.4.0 启动中...', { logLevel: Object.keys(LOG_L
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/tools', express.static(path.join(__dirname, 'tools')));
 
 // 请求日志中间件
 const reqLogger = createLogger('HTTP');
