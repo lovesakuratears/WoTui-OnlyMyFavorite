@@ -16,9 +16,7 @@
 
 ## 🌟 项目简介
 
-WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微博用户，自动抓取并本地保存其全部帖子与图片。支持 Docker 一键部署，数据完全存储在本地，隐私安全。
-
-> **v1.0 正式版** — 采用 CloakBrowser 隐形 Chromium 内核（C++ 源码级反爬），Docker 环境完美支持无头浏览器登录。
+WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微博用户，定时自动抓取并本地保存其全部帖子与图片。支持 Docker 一键部署，数据完全存储在本地，隐私安全。
 
 ---
 
@@ -27,7 +25,7 @@ WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微
 | 特性 | 说明 |
 |------|------|
 | 🔐 **微博登录** | 自动浏览器窗口 / 手动 Cookie 粘贴 / Docker 无头截图登录 |
-| 🛡️ **CloakBrowser 隐形内核** | C++ 源码级反爬补丁，57 个补丁绕过 reCAPTCHA v3 |
+| 🛡️ **CloakBrowser 内核** | C++ 源码级反爬补丁 |
 | 📋 **订阅管理** | 添加/删除微博用户订阅，字母排序 + 分页 |
 | 🔄 **智能抓取** | 全量 / 增量 / 并发 / 断点恢复 / 强制全量覆盖 |
 | 🖼️ **图片归档** | 自动下载帖子图片，去重 + 重试 + 已有检测跳过 |
@@ -36,20 +34,35 @@ WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微
 | 💾 **图片下载** | 一键保存图片到本地 |
 | 📡 **实时进度** | SSE 推送抓取进度，无需刷新页面 |
 | 🐳 **Docker 支持** | 一键容器化部署，数据持久化 |
-| 🖥️ **截图日志面板** | Docker 无头模式下截图 + 日志 + 计时器一体化面板 |
 
 ---
 
 ## 🚀 快速启动
+### 方式一：docker run
 
-### 方式一：Docker（推荐）
+```bash
+# 拉取镜像并运行
+docker run -d \
+  --name wotui \
+  -p 3030:3030 \
+  -v wotui_data:/app/data \
+  lovesakura/wotui:latest
+
+# 查看日志
+docker logs -f wotui
+
+# 访问
+open http://localhost:3030
+```
+
+### 方式二：docker compose
 
 ```bash
 # 克隆项目
 git clone https://github.com/lovesakuratears/WoTui-OnlyMyFavorite.git
 cd WoTui-OnlyMyFavorite
 
-# 一键启动（构建 + 运行）
+# 构建并后台启动
 docker compose up -d
 
 # 查看日志
@@ -59,9 +72,9 @@ docker compose logs -f
 open http://localhost:3030
 ```
 
-> 首次构建需下载 CloakBrowser 隐形 Chromium（约 200MB），请耐心等待。
+> 首次运行需下载 CloakBrowser 隐形 Chromium（约 200MB），请耐心等待。
 
-### 方式二：本地 Node.js
+### 方式三：本地 Node.js
 
 ```bash
 # 前置要求：Node.js >= 20
