@@ -840,9 +840,10 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
         <div className="modal-body">
           {playwrightMissing && (
             <div className="login-tip" style={{marginBottom:'12px',background:'#fff4e5',border:'1px solid #ffb74d',padding:'10px 12px',borderRadius:'6px'}}>
-              ⚠️ <strong>Playwright Chromium 浏览器未安装</strong>，自动登录已禁用。<br/>
-              请在 WoTui 项目目录运行：<code>npx playwright install chromium</code>（约 150MB，仅需一次）。<br/>
-              或使用本机工具一键导出 Cookie：双击 <code>tools/导出Cookie-Mac.command</code> / <code>tools/导出Cookie-Windows.bat</code>。
+              ⚠️ <strong>本机未检测到 Chromium 内核浏览器</strong>（Chrome / Edge / Brave / Chromium），自动登录已禁用。<br/>
+              请安装 <strong>Chrome</strong>（推荐）/ Edge / Brave 任一浏览器，WoTui 会自动复用；<br/>
+              或在 WoTui 项目目录运行：<code>npx playwright install chromium</code>（约 150MB，仅需一次）；<br/>
+              也可双击 <code>tools/导出Cookie-Mac.command</code> / <code>tools/导出Cookie-Windows.bat</code> 在本机直接导出 Cookie。
             </div>
           )}
           {headlessOnly && mode === 'manual' && (

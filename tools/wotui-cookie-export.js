@@ -18,12 +18,14 @@
 'use strict';
 
 const path = require('path');
+const os = require('os');
+const fs = require('fs');
 const readline = require('readline');
 const http = require('http');
 const https = require('https');
 const { spawnSync } = require('child_process');
 
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const DEFAULT_URL = 'http://localhost:3000';
 
 // ── 终端着色 ─────────────────────────────────────────────────────────────────
@@ -98,22 +100,72 @@ function httpRequest(targetUrl, options = {}) {
   });
 }
 
-function isChromiumInstalled() {
+// ── 浏览器探测 ────────────────────────────────────────────────────────────────
+// 优先使用本机已装 Chrome / Edge / Brave / Chromium / Arc / Vivaldi，
+// 没装时再退回 Playwright 内置 Chromium（需 ~150MB 下载）
+function getSystemBrowserCandidates() {
+  const home = os.homedir();
+  if (process.platform === 'darwin') {
+    const apps = [
+      ['Google Chrome',         'Google Chrome.app/Contents/MacOS/Google Chrome'],
+      ['Microsoft Edge',        'Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
+      ['Brave Browser',         'Brave Browser.app/Contents/MacOS/Brave Browser'],
+      ['Chromium',              'Chromium.app/Contents/MacOS/Chromium'],
+      ['Arc',                   'Arc.app/Contents/MacOS/Arc'],
+      ['Vivaldi',               'Vivaldi.app/Contents/MacOS/Vivaldi'],
+      ['Google Chrome Canary',  'Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'],
+    ];
+    const roots = ['/Applications', path.join(home, 'Applications')];
+    const out = [];
+    for (const [name, rel] of apps) for (const r of roots) out.push({ name, exe: path.join(r, rel) });
+    return out;
+  }
+  if (process.platform === 'win32') {
+    const pf  = process.env['PROGRAMFILES']      || 'C:\\Program Files';
+    const pf86= process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const lad = process.env['LOCALAPPDATA']      || path.join(home, 'AppData', 'Local');
+    return [
+      { name: 'Google Chrome',  exe: path.join(pf,   'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Google Chrome',  exe: path.join(pf86, 'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Google Chrome',  exe: path.join(lad,  'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Microsoft Edge', exe: path.join(pf86, 'Microsoft\\Edge\\Application\\msedge.exe') },
+      { name: 'Microsoft Edge', exe: path.join(pf,   'Microsoft\\Edge\\Application\\msedge.exe') },
+      { name: 'Brave Browser',  exe: path.join(pf,   'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Brave Browser',  exe: path.join(pf86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Brave Browser',  exe: path.join(lad,  'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Vivaldi',        exe: path.join(lad,  'Vivaldi\\Application\\vivaldi.exe') },
+      { name: 'Chromium',       exe: path.join(pf,   'Chromium\\Application\\chrome.exe') },
+    ];
+  }
+  return [
+    { name: 'Google Chrome', exe: '/usr/bin/google-chrome-stable' },
+    { name: 'Google Chrome', exe: '/usr/bin/google-chrome' },
+    { name: 'Chromium',      exe: '/usr/bin/chromium-browser' },
+    { name: 'Chromium',      exe: '/usr/bin/chromium' },
+    { name: 'Chromium',      exe: '/snap/bin/chromium' },
+    { name: 'Microsoft Edge',exe: '/usr/bin/microsoft-edge-stable' },
+    { name: 'Microsoft Edge',exe: '/usr/bin/microsoft-edge' },
+    { name: 'Brave Browser', exe: '/usr/bin/brave-browser' },
+    { name: 'Brave Browser', exe: '/usr/bin/brave' },
+  ];
+}
+
+function detectBrowser() {
+  for (const c of getSystemBrowserCandidates()) {
+    try { if (fs.existsSync(c.exe)) return { source: 'system', name: c.name, executablePath: c.exe }; } catch (_) {}
+  }
   try {
     const { chromium } = require('playwright');
     const exe = chromium.executablePath();
-    return Boolean(exe) && require('fs').existsSync(exe);
-  } catch (_) {
-    return false;
-  }
+    if (exe && fs.existsSync(exe)) return { source: 'bundled', name: 'Playwright Chromium', executablePath: exe };
+  } catch (_) {}
+  return null;
 }
 
 function installChromium() {
   console.log(info('→ 正在安装 Playwright Chromium 浏览器（首次运行需要，约 150MB）…'));
-  // 优先用本地 node_modules/.bin/playwright，否则 npx
   const root = path.resolve(__dirname, '..');
   const localBin = path.join(root, 'node_modules', '.bin', 'playwright');
-  const fs = require('fs');
   let cmd, args;
   if (fs.existsSync(localBin)) {
     cmd = localBin;
@@ -131,7 +183,7 @@ async function main() {
   console.log('');
   console.log(c.bold + '┌──────────────────────────────────────────────────────────┐' + c.reset);
   console.log(c.bold + `│  WoTui Cookie 导出工具 v${VERSION}                              │` + c.reset);
-  console.log(c.bold + '│  本机登录 m.weibo.cn → 自动捕获 Cookie → 推送到 Docker   │' + c.reset);
+  console.log(c.bold + '│  优先复用本机 Chrome/Edge/Brave → 自动捕获 → 推送 Docker │' + c.reset);
   console.log(c.bold + '└──────────────────────────────────────────────────────────┘' + c.reset);
   console.log('');
 
@@ -171,31 +223,48 @@ async function main() {
   }
   console.log('');
 
-  // 3. 检查 Playwright Chromium
-  if (!isChromiumInstalled()) {
-    console.log(warn('⚠ 未检测到 Playwright Chromium，需要先安装。'));
-    const yn = await ask(`是否现在安装？${dim('[Y/n]')} `);
+  // 3. 选择浏览器：优先用本机已装的 Chrome/Edge/Brave/...，否则用 Playwright 内置 Chromium
+  let browserInfo = detectBrowser();
+  if (browserInfo) {
+    const tag = browserInfo.source === 'system' ? ok('系统已装') : warn('内置（已下载）');
+    console.log(`→ 浏览器：${tag} ${ok(browserInfo.name)}`);
+    console.log(`  ${dim(browserInfo.executablePath)}`);
+  } else {
+    console.log(warn('⚠ 未检测到本机已装的 Chrome / Edge / Brave / Chromium，'));
+    console.log(warn('  也没有 Playwright 内置 Chromium。'));
+    console.log(dim('  建议：先安装 Chrome（推荐，更新及时）'));
+    console.log(dim('        或下载 Playwright 内置 Chromium（约 150MB，仅需一次）'));
+    const yn = await ask(`是否现在下载内置 Chromium？${dim('[Y/n]')} `);
     if (yn && /^n/i.test(yn)) {
-      console.log(err('已取消。请手动运行: npx playwright install chromium'));
+      console.log(err('已取消。请安装 Chrome / Edge / Brave 任一浏览器后重试，或手动运行: npx playwright install chromium'));
       process.exit(1);
     }
     if (!installChromium()) {
       console.log(err('✗ 安装失败，请手动运行: npx playwright install chromium'));
       process.exit(1);
     }
-    console.log(ok('✓ Chromium 已就绪'));
-    console.log('');
+    browserInfo = detectBrowser();
+    if (!browserInfo) {
+      console.log(err('✗ 安装后仍未检测到浏览器，请手动检查'));
+      process.exit(1);
+    }
+    console.log(ok(`✓ ${browserInfo.name} 已就绪`));
   }
+  console.log('');
 
   // 4. 启动 Playwright
-  console.log(info('→ 启动 Chromium 窗口，访问 m.weibo.cn …'));
+  console.log(info(`→ 启动 ${browserInfo.name} 窗口，访问 m.weibo.cn …`));
   const { chromium } = require('playwright');
   let browser, context, page;
   try {
-    browser = await chromium.launch({
+    const launchOpts = {
       headless: false,
       args: ['--disable-blink-features=AutomationControlled'],
-    });
+    };
+    if (browserInfo.source === 'system') {
+      launchOpts.executablePath = browserInfo.executablePath;
+    }
+    browser = await chromium.launch(launchOpts);
     // 用移动版 UA + 移动端 viewport，避免被微博识别为 PC
     context = await browser.newContext({
       viewport: { width: 390, height: 844 },
@@ -212,7 +281,7 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(ok('✓ 浏览器已打开 m.weibo.cn'));
+  console.log(ok(`✓ 浏览器已打开 m.weibo.cn`));
   console.log('');
   console.log(c.bold + '请在浏览器中完成登录（账号密码 / 短信 / 扫码均可）。' + c.reset);
   console.log(dim('  登录成功的标志：页面右下角导航栏出现“我”，或左上角显示头像/昵称。'));

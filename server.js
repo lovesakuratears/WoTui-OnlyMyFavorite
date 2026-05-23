@@ -22,6 +22,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { chromium } = require('playwright');
 const axios = require('axios');
 
@@ -42,22 +43,107 @@ function detectHeadlessOnlyEnv() {
 const IS_HEADLESS_ONLY = detectHeadlessOnlyEnv();
 
 /**
- * 检查 Playwright Chromium 浏览器二进制是否真的安装到本机
- * Playwright 模块本身（require('playwright')）不代表浏览器已下载，
- * `npx playwright install chromium` 才会下到 ~/Library/Caches/ms-playwright/
+ * 检测可用的 Chromium 内核浏览器，优先级：
+ *   1) 系统已装的 Chrome / Edge / Brave / Chromium / Arc / Vivaldi
+ *      → 0 下载、版本随系统更新、用户体感更友好
+ *   2) Playwright 内置 Chromium（npx playwright install chromium 落到 ~/Library/Caches/...）
+ *      → 兜底
+ * 探测结果会被缓存在 BROWSER_CACHE，避免每次请求都做 fs.existsSync。
  */
-function getPlaywrightStatus() {
-  try {
-    const exe = chromium.executablePath();
-    if (!exe) return { available: false, executablePath: null, reason: 'executablePath 为空' };
-    if (!fs.existsSync(exe)) return { available: false, executablePath: exe, reason: '可执行文件不存在' };
-    return { available: true, executablePath: exe };
-  } catch (e) {
-    return { available: false, executablePath: null, reason: e.message || String(e) };
+function getSystemBrowserCandidates() {
+  const home = os.homedir();
+  if (process.platform === 'darwin') {
+    const apps = [
+      ['Google Chrome',         'Google Chrome.app/Contents/MacOS/Google Chrome'],
+      ['Microsoft Edge',        'Microsoft Edge.app/Contents/MacOS/Microsoft Edge'],
+      ['Brave Browser',         'Brave Browser.app/Contents/MacOS/Brave Browser'],
+      ['Chromium',              'Chromium.app/Contents/MacOS/Chromium'],
+      ['Arc',                   'Arc.app/Contents/MacOS/Arc'],
+      ['Vivaldi',               'Vivaldi.app/Contents/MacOS/Vivaldi'],
+      ['Google Chrome Canary',  'Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary'],
+    ];
+    const roots = ['/Applications', path.join(home, 'Applications')];
+    const out = [];
+    for (const [name, rel] of apps) {
+      for (const root of roots) out.push({ name, exe: path.join(root, rel) });
+    }
+    return out;
   }
+  if (process.platform === 'win32') {
+    const pf  = process.env['PROGRAMFILES']      || 'C:\\Program Files';
+    const pf86= process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const lad = process.env['LOCALAPPDATA']      || path.join(home, 'AppData', 'Local');
+    return [
+      { name: 'Google Chrome',  exe: path.join(pf,   'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Google Chrome',  exe: path.join(pf86, 'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Google Chrome',  exe: path.join(lad,  'Google\\Chrome\\Application\\chrome.exe') },
+      { name: 'Microsoft Edge', exe: path.join(pf86, 'Microsoft\\Edge\\Application\\msedge.exe') },
+      { name: 'Microsoft Edge', exe: path.join(pf,   'Microsoft\\Edge\\Application\\msedge.exe') },
+      { name: 'Brave Browser',  exe: path.join(pf,   'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Brave Browser',  exe: path.join(pf86, 'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Brave Browser',  exe: path.join(lad,  'BraveSoftware\\Brave-Browser\\Application\\brave.exe') },
+      { name: 'Vivaldi',        exe: path.join(lad,  'Vivaldi\\Application\\vivaldi.exe') },
+      { name: 'Chromium',       exe: path.join(pf,   'Chromium\\Application\\chrome.exe') },
+    ];
+  }
+  // linux & others
+  return [
+    { name: 'Google Chrome', exe: '/usr/bin/google-chrome-stable' },
+    { name: 'Google Chrome', exe: '/usr/bin/google-chrome' },
+    { name: 'Chromium',      exe: '/usr/bin/chromium-browser' },
+    { name: 'Chromium',      exe: '/usr/bin/chromium' },
+    { name: 'Chromium',      exe: '/snap/bin/chromium' },
+    { name: 'Microsoft Edge',exe: '/usr/bin/microsoft-edge-stable' },
+    { name: 'Microsoft Edge',exe: '/usr/bin/microsoft-edge' },
+    { name: 'Brave Browser', exe: '/usr/bin/brave-browser' },
+    { name: 'Brave Browser', exe: '/usr/bin/brave' },
+  ];
 }
 
-const PLAYWRIGHT_INSTALL_HINT = '请在 WoTui 项目目录运行：npx playwright install chromium（约 150MB，仅需一次）。如不便安装，可改用本项目根目录的 tools/wotui-cookie-export.js（自动处理依赖）。';
+let BROWSER_CACHE = null;
+function detectBrowser({ refresh = false } = {}) {
+  if (BROWSER_CACHE && !refresh) return BROWSER_CACHE;
+
+  // 1) 系统浏览器
+  for (const c of getSystemBrowserCandidates()) {
+    try {
+      if (fs.existsSync(c.exe)) {
+        BROWSER_CACHE = { available: true, source: 'system', name: c.name, executablePath: c.exe, reason: null };
+        return BROWSER_CACHE;
+      }
+    } catch (_) {}
+  }
+
+  // 2) Playwright 内置 Chromium
+  try {
+    const exe = chromium.executablePath();
+    if (exe && fs.existsSync(exe)) {
+      BROWSER_CACHE = { available: true, source: 'bundled', name: 'Playwright Chromium', executablePath: exe, reason: null };
+      return BROWSER_CACHE;
+    }
+    BROWSER_CACHE = { available: false, source: null, name: null, executablePath: exe || null, reason: exe ? '可执行文件不存在' : 'executablePath 为空' };
+  } catch (e) {
+    BROWSER_CACHE = { available: false, source: null, name: null, executablePath: null, reason: e.message || String(e) };
+  }
+  return BROWSER_CACHE;
+}
+
+// 兼容旧调用名
+function getPlaywrightStatus() { return detectBrowser(); }
+
+/**
+ * 生成 chromium.launch 配置：若发现系统浏览器则注入 executablePath，
+ * 否则交给 Playwright 用 bundled Chromium。
+ */
+function withDetectedBrowser(opts = {}) {
+  const b = detectBrowser();
+  if (b.available && b.executablePath && b.source === 'system') {
+    return { ...opts, executablePath: b.executablePath };
+  }
+  return opts;
+}
+
+const PLAYWRIGHT_INSTALL_HINT = '建议安装 Chrome（推荐）/ Edge / Brave 任一浏览器即可，工具会自动复用。如不想装外部浏览器，可在 WoTui 项目目录运行：npx playwright install chromium（约 150MB，仅需一次）；也可使用项目根目录的 tools/wotui-cookie-export.js 在本机直接导出 Cookie。';
 
 // ─── 目录初始化 ────────────────────────────────────────────────────────────────
 
@@ -582,10 +668,10 @@ async function openLoginWindow() {
     hasTouch: true,
   };
 
-  loginBrowser = await chromium.launch({
+  loginBrowser = await chromium.launch(withDetectedBrowser({
     headless: false,
     args: [...BROWSER_ARGS, '--window-size=420,900'],
-  });
+  }));
   const context = await loginBrowser.newContext(mobileContextOptions);
   await context.addInitScript(INIT_SCRIPT);
   const page = await context.newPage();
@@ -679,7 +765,7 @@ async function getSharedContext(cookies) {
     }
 
     ctxLogger.info('创建后台浏览器上下文...');
-    sharedBrowser = await chromium.launch({ headless: true, args: BROWSER_ARGS });
+    sharedBrowser = await chromium.launch(withDetectedBrowser({ headless: true, args: BROWSER_ARGS }));
     const context = await sharedBrowser.newContext({ ...CONTEXT_OPTIONS });
     await context.addInitScript(INIT_SCRIPT);
 
@@ -1597,6 +1683,7 @@ app.get('/api/auth/status', async (req, res) => {
     }
   }
 
+  const b = detectBrowser();
   res.json({
     success: true,
     data: {
@@ -1608,7 +1695,8 @@ app.get('/api/auth/status', async (req, res) => {
         : null,
       verifyResult: verifyResult || undefined,
       headlessOnly: IS_HEADLESS_ONLY,
-      playwrightMissing: !getPlaywrightStatus().available,
+      playwrightMissing: !b.available,
+      browser: { available: b.available, source: b.source, name: b.name, reason: b.reason },
     }
   });
 });
@@ -1629,18 +1717,19 @@ app.post('/api/auth/login', async (req, res) => {
     });
   }
 
-  // 预检 Playwright Chromium 是否已安装（否则 chromium.launch 会异步抛错，前端拿不到反馈）
-  const pwStatus = getPlaywrightStatus();
-  if (!pwStatus.available) {
-    loginLogger.error(`Playwright Chromium 未安装: ${pwStatus.reason}`, { executablePath: pwStatus.executablePath });
+  // 预检：检查是否有任何可用浏览器（系统 Chrome/Edge/Brave/... 或 bundled Chromium）
+  const bStatus = detectBrowser({ refresh: true }); // 强制刷新缓存，覆盖用户中途安装浏览器的场景
+  if (!bStatus.available) {
+    loginLogger.error(`无可用浏览器: ${bStatus.reason}`, { executablePath: bStatus.executablePath });
     return res.status(503).json({
       success: false,
       playwrightMissing: true,
-      error: `Playwright Chromium 浏览器未安装（${pwStatus.reason}）。${PLAYWRIGHT_INSTALL_HINT}`,
+      error: `本机未检测到 Chrome / Edge / Brave / Chromium 等浏览器（${bStatus.reason || '未知原因'}）。${PLAYWRIGHT_INSTALL_HINT}`,
       installCommand: 'npx playwright install chromium',
-      executablePath: pwStatus.executablePath,
+      executablePath: bStatus.executablePath,
     });
   }
+  loginLogger.info(`使用浏览器：${bStatus.name}（${bStatus.source}）`, { executablePath: bStatus.executablePath });
 
   // 如果已有待确认的登录窗口，直接返回
   if (pendingLoginContext) {
@@ -1652,10 +1741,9 @@ app.post('/api/auth/login', async (req, res) => {
 
   openLoginWindow().catch(err => {
     loginLogger.error(`打开登录窗口异常: ${err.message}`);
-    // 通过 SSE 通知前端，避免用户一直等不出登录窗口
-    const isMissingBrowser = /Executable doesn't exist|playwright install/i.test(err.message || '');
+    const isMissingBrowser = /Executable doesn't exist|playwright install|spawn .* ENOENT/i.test(err.message || '');
     const friendlyMsg = isMissingBrowser
-      ? `打开登录窗口失败：Playwright Chromium 未安装。${PLAYWRIGHT_INSTALL_HINT}`
+      ? `打开登录窗口失败：本机浏览器不可用。${PLAYWRIGHT_INSTALL_HINT}`
       : `打开登录窗口失败：${err.message}`;
     const payload = `data: ${JSON.stringify({
       type: 'loginResult',
@@ -2221,6 +2309,7 @@ app.get('/api/profile/:uid', (req, res) => {
 
 // GET /api/health
 app.get('/api/health', (req, res) => {
+  const b = detectBrowser();
   res.json({
     success: true,
     version: '0.4.0',
@@ -2232,7 +2321,8 @@ app.get('/api/health', (req, res) => {
     rateLimits: RATE_LIMIT,
     cacheSize: postCache.size,
     headlessOnly: IS_HEADLESS_ONLY,
-    playwrightMissing: !getPlaywrightStatus().available,
+    playwrightMissing: !b.available,
+    browser: { available: b.available, source: b.source, name: b.name, reason: b.reason },
   });
 });
 
@@ -2254,6 +2344,15 @@ app.listen(PORT, () => {
 
   if (IS_HEADLESS_ONLY) {
     logger.warn(`🐳 检测到 Docker / 无 DISPLAY 环境，自动登录已禁用，请使用「手动粘贴 Cookie」方式登录`);
+  } else {
+    const b = detectBrowser();
+    if (b.available && b.source === 'system') {
+      logger.info(`🌐 使用系统浏览器：${b.name}（${b.executablePath}）— 无需下载额外组件`);
+    } else if (b.available && b.source === 'bundled') {
+      logger.info(`🌐 使用 Playwright 内置 Chromium（${b.executablePath}）`);
+    } else {
+      logger.warn(`⚠️  未检测到任何 Chromium 内核浏览器，自动登录将不可用。${PLAYWRIGHT_INSTALL_HINT}`);
+    }
   }
 
   restoreSchedulers();
