@@ -809,14 +809,13 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
     setVerifyResult(null);
     try {
       const res = await API.setCookie(cookieStr.trim());
-      setVerifyResult(res.verifyResult);
-      if (res.loggedIn) {
-        const name = res.verifyResult?.name || res.verifyResult?.uid || '';
-        toast(name ? `Cookie 验证成功！欢迎 ${name}` : 'Cookie 设置成功，登录态已验证', 'success');
+      if (res.success) {
+        toast(res.message || 'Cookie 已保存', 'success');
         onLoginSuccess();
         onClose();
       } else {
-        toast(res.message || 'Cookie 已保存，但未验证到登录态', 'warn');
+        setVerifyResult({ valid: false, error: res.error || res.message || '保存失败' });
+        toast(res.error || res.message || '保存失败', 'error');
       }
     } catch (_) { toast('网络错误', 'error'); }
     setLoading(false);
@@ -897,23 +896,24 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
           ) : (
             <div className="login-manual">
               <p className="form-hint">
-                在浏览器中打开并登录 <a href="https://m.weibo.cn" target="_blank" rel="noopener">m.weibo.cn</a>（<strong>移动版</strong>，PC 版反爬严重不要用），
-                按 F12 → Console → 输入 <code>document.cookie</code> 回车，复制返回的字符串粘贴到下方。
-                <br/><strong>重要：Cookie 必须包含 SUB 字段；推荐同时包含 MLOGIN、_T_WM。</strong>
+                <strong>步骤 1：</strong>点击下方按钮在新标签登录 <strong>m.weibo.cn</strong>（移动版，PC 版反爬严重）。<br/>
+                <strong>步骤 2：</strong>登录后在该页面按 F12 → Console → 输入 <code>document.cookie</code> 回车，复制返回的字符串粘贴到下方。<br/>
+                <span style={{color:'var(--text-muted)'}}>不再校验 Cookie 字段，点击「保存」即采纳；若实际未登录可在右上角「重新登录」。</span>
               </p>
+              <button
+                className="btn btn-ghost btn-block"
+                onClick={() => window.open('https://m.weibo.cn', '_blank', 'noopener')}
+                style={{marginBottom:'10px'}}
+              >🌐 在新标签打开 m.weibo.cn 登录</button>
               <label className="form-label">Cookie 字符串</label>
               <textarea className="form-textarea" rows={5}
-                placeholder="粘贴 Cookie，格式：SUB=xxx; SUBP=xxx; ..."
+                placeholder="粘贴 Cookie，例如：SUB=xxx; SUBP=xxx; _T_WM=xxx; ..."
                 value={cookieStr} onChange={e => setCookieStr(e.target.value)} />
-              {verifyResult && (
-                <div className={`verify-result ${verifyResult.valid ? 'success' : 'fail'}`}>
-                  {verifyResult.valid === true
-                    ? `✅ 验证成功，当前账号：${verifyResult.name || verifyResult.uid}`
-                    : `⚠️ ${verifyResult.error || '验证跳过'}`}
-                </div>
+              {verifyResult && verifyResult.valid === false && (
+                <div className="verify-result fail">⚠️ {verifyResult.error || '提交失败'}</div>
               )}
               <button className="btn btn-primary btn-block" onClick={handleManualCookie} disabled={loading} style={{marginTop:'12px'}}>
-                {loading ? '验证中...' : '保存并验证 Cookie'}
+                {loading ? '保存中...' : '保存 Cookie'}
               </button>
             </div>
           )}
@@ -1301,6 +1301,13 @@ function App() {
           {loggedIn ? (
             <>
               <span className="login-status"><span className="status-dot success"></span>已登录</span>
+              <button className="btn btn-ghost btn-sm" title="清除当前 Cookie 并重新登录" onClick={async () => {
+                try {
+                  await API.logout();
+                  setLoggedIn(false);
+                  setShowLoginModal(true);
+                } catch (_) { toast('无法连接服务器', 'error'); }
+              }}>🔄 重新登录</button>
               <button className="btn btn-ghost btn-sm" onClick={async () => {
                 try {
                   const res = await API.logout();

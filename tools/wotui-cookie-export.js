@@ -301,24 +301,24 @@ async function main() {
     process.exit(1);
   }
   const weiboCookies = allCookies.filter(c => /weibo\.(cn|com)$/i.test(c.domain.replace(/^\./, '')) || /\.weibo\.(cn|com)$/i.test(c.domain));
-  const names = new Set(weiboCookies.map(c => c.name));
-  if (!names.has('SUB')) {
-    console.log(err(`✗ 未检测到 SUB Cookie（共 ${weiboCookies.length} 个 weibo 域 Cookie），登录可能未完成`));
-    console.log(dim('  请确认浏览器页面已显示登录后的内容（如“我”页可见昵称），再重新运行本工具。'));
+  if (weiboCookies.length === 0) {
+    console.log(err(`✗ 未采集到任何 weibo 域 Cookie，浏览器可能还没加载完成`));
+    console.log(dim('  请确认浏览器页面已显示 m.weibo.cn 内容，再重新运行本工具。'));
     try { await browser.close(); } catch (_) {}
     process.exit(1);
   }
+  const names = new Set(weiboCookies.map(c => c.name));
   console.log(ok(`✓ 已捕获 ${weiboCookies.length} 个 weibo 域 Cookie`));
   const keyNames = ['SUB', 'SUBP', '_T_WM', 'MLOGIN', 'SUHB', 'XSRF-TOKEN'];
   const present = keyNames.filter(n => names.has(n));
   const missing = keyNames.filter(n => !names.has(n));
-  console.log(`  ${dim('关键字段')} ${present.length ? ok(present.join(', ')) : err('无')}`);
-  if (missing.length) console.log(`  ${dim('缺失（非必需）')} ${warn(missing.join(', '))}`);
+  console.log(`  ${dim('关键字段')} ${present.length ? ok(present.join(', ')) : warn('无（若实际未登录请重试）')}`);
+  if (missing.length) console.log(`  ${dim('缺失（仅供参考，不再做校验）')} ${dim(missing.join(', '))}`);
   console.log('');
 
-  // 7. 拼成字符串推送
+  // 7. 拼成字符串推送（服务端已取消在线校验，点提交即采纳）
   const cookieStr = weiboCookies.map(c => `${c.name}=${c.value}`).join('; ');
-  process.stdout.write(`→ 推送到 ${target}/api/auth/set-cookie 并在线校验 … `);
+  process.stdout.write(`→ 推送到 ${target}/api/auth/set-cookie … `);
   try {
     const r = await httpRequest(target + '/api/auth/set-cookie', {
       method: 'POST',
@@ -327,10 +327,8 @@ async function main() {
     });
     if (r.data && r.data.success) {
       console.log(ok('✓'));
-      console.log(`  ${r.data.message || '已保存并通过校验'}`);
-      if (r.data.verifyResult && r.data.verifyResult.name) {
-        console.log(`  ${dim('登录身份')} ${ok(r.data.verifyResult.name)} (uid=${r.data.verifyResult.uid || '?'})`);
-      }
+      console.log(`  ${r.data.message || '已保存'}`);
+      console.log(dim('  ※ 服务端不再做在线校验，若实际未登录请在 WoTui 网页点「重新登录」'));
     } else {
       console.log(err('✗'));
       console.log(err(`  ${(r.data && (r.data.error || r.data.message)) || `HTTP ${r.status}`}`));

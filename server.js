@@ -544,9 +544,9 @@ function cookiesToString(cookies) {
 }
 
 function checkLoginFromCookies(cookies) {
-  if (!cookies || cookies.length === 0) return false;
-  const names = new Set(cookies.map(c => c.name));
-  return names.has('SUB') || names.has('SUBP');
+  // 用户已要求取消在线校验，只要本机有保存过 Cookie 就视为已登录；
+  // 若实际未登录，让用户通过「重新登录」按钮自行清理重置。
+  return Array.isArray(cookies) && cookies.length > 0;
 }
 
 /**
@@ -705,22 +705,16 @@ async function openLoginWindow() {
     if (!pendingLoginContext) return; // 已被 confirmLogin 处理
     clearTimeout(timeoutTimer);
     loginLogger.info('用户手动关闭了登录窗口（未确认）');
-    // 也尝试采集一次 Cookie，但必须在线验证通过才保存
+    // 关窗即视为用户放弃确认；如有 Cookie 仍保留备用，不做在线校验
     try {
       const cookies = await context.cookies().catch(() => []);
-      if (checkLoginFromCookies(cookies)) {
-        const verify = await verifyCookieOnline(cookies);
-        if (verify.valid === true) {
-          saveCookies(cookies);
-          isLoggedIn = true;
-          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: `窗口已关闭，登录成功（${verify.name || verify.uid}）`, userInfo: verify })}\n\n`;
-          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
-        } else {
-          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: `窗口已关闭，Cookie 验证未通过：${verify.error || '请重新登录'}` })}\n\n`;
-          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
-        }
+      if (cookies && cookies.length > 0) {
+        saveCookies(cookies);
+        isLoggedIn = true;
+        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: `窗口已关闭，已保存 ${cookies.length} 条 Cookie（未校验）`, userInfo: {} })}\n\n`;
+        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
       } else {
-        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未检测到登录 Cookie' })}\n\n`;
+        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未采集到任何 Cookie' })}\n\n`;
         for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
       }
     } catch (_) {}
@@ -1766,7 +1760,7 @@ app.post('/api/auth/confirm-login', async (req, res) => {
     return res.status(400).json({ success: false, error: '没有待确认的登录窗口，请先点击「打开微博登录窗口」' });
   }
 
-  loginLogger.info('用户手动确认登录，采集 Cookie...');
+  loginLogger.info('用户手动确认登录，采集 Cookie（跳过在线校验，信任用户操作）...');
 
   try {
     const finalCookies = await pendingLoginContext.cookies([
@@ -1776,65 +1770,31 @@ app.post('/api/auth/confirm-login', async (req, res) => {
       'https://passport.weibo.com',
     ]);
 
-    const subCookie = finalCookies.find(c => c.name === 'SUB');
-    if (!subCookie) {
-      loginLogger.warn('确认时未找到 SUB Cookie，用户可能还未完成登录');
+    if (!finalCookies || finalCookies.length === 0) {
+      loginLogger.warn('确认时未采集到任何 Cookie，登录窗口可能未加载完成');
       return res.json({
         success: false,
-        error: '未检测到登录 Cookie（SUB），请确认已在浏览器中完成登录并重试',
-        cookieCount: finalCookies.length,
+        error: '未采集到任何 Cookie，请确认浏览器已加载 m.weibo.cn 后再点击',
       });
     }
 
     saveCookies(finalCookies);
-    loginLogger.info(`Cookie 已保存 ${finalCookies.length} 条，正在验证...`);
+    isLoggedIn = true;
+    loginLogger.info(`✅ Cookie 已保存 ${finalCookies.length} 条（未校验，用户已确认）`);
 
-    // 在线验证
-    const verifyResult = await verifyCookieOnline(finalCookies);
+    const ssePayload = `data: ${JSON.stringify({
+      type: 'loginResult', success: true,
+      message: `已保存 ${finalCookies.length} 条 Cookie`,
+      userInfo: {},
+    })}\n\n`;
+    for (const client of sseClients) { try { client.write(ssePayload); } catch (_) {} }
 
-    if (verifyResult.valid === true) {
-      isLoggedIn = true;
-      loginLogger.info('✅ 登录验证成功', { uid: verifyResult.uid, name: verifyResult.name });
-
-      // SSE 推送登录结果
-      const ssePayload = `data: ${JSON.stringify({
-        type: 'loginResult', success: true,
-        message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`,
-        userInfo: verifyResult,
-      })}\n\n`;
-      for (const client of sseClients) { try { client.write(ssePayload); } catch (_) {} }
-
-      await closePendingLogin();
-      return res.json({ success: true, message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`, userInfo: verifyResult });
-
-    } else if (verifyResult.valid === false) {
-      // 明确验证失败：清空已保存的 Cookie，避免下次启动伪登录态
-      loginLogger.warn('Cookie 在线验证失败，清空磁盘 Cookie', { error: verifyResult.error });
-      writeJSON(COOKIE_FILE, []);
-      isLoggedIn = false;
-      // 同步推送登录失败结果，前端能及时反馈
-      const ssePayload = `data: ${JSON.stringify({
-        type: 'loginResult', success: false,
-        message: verifyResult.error || 'Cookie 验证失败，请重新登录',
-      })}\n\n`;
-      for (const client of sseClients) { try { client.write(ssePayload); } catch (_) {} }
-      await closePendingLogin();
-      return res.json({
-        success: false,
-        error: verifyResult.error || 'Cookie 验证失败，请确认已在浏览器中完成登录后再点击',
-      });
-
-    } else {
-      // valid === null：网络异常，降级接受
-      loginLogger.warn('在线验证网络失败，降级接受');
-      isLoggedIn = true;
-      await closePendingLogin();
-      return res.json({ success: true, message: 'Cookie 已保存（验证服务暂时不可用）', userInfo: {} });
-    }
-
-  } catch (err) {
-    loginLogger.error(`确认登录异常: ${err.message}`);
-    return res.status(500).json({ success: false, error: `处理异常: ${err.message}` });
+    await closePendingLogin();
+    return res.json({ success: true, message: `已保存 ${finalCookies.length} 条 Cookie，若实际未登录可点「重新登录」`, userInfo: {} });
+  } catch (e) {
+    loginLogger.error(`confirm-login 异常: ${e.message}`);
+    await closePendingLogin();
+    return res.status(500).json({ success: false, error: e.message });
   }
 });
 
@@ -1869,40 +1829,18 @@ app.post('/api/auth/set-cookie', async (req, res) => {
     return name ? { name, value, domain: '.weibo.cn', path: '/', sameSite: 'Lax' } : null;
   }).filter(Boolean);
 
+  if (cookies.length === 0) {
+    return res.status(400).json({ success: false, error: '解析后 Cookie 数为 0，请检查格式（应为 "name=value; name=value; ..."）' });
+  }
+
   saveCookies(cookies);
-
-  const hasSUB = cookies.some(c => c.name === 'SUB' || c.name === 'SUBP');
-  if (!hasSUB) {
-    // 没有关键 Cookie，直接清空以免伪登录态
-    writeJSON(COOKIE_FILE, []);
-    isLoggedIn = false;
-    return res.json({ success: false, error: `已收到 ${cookies.length} 条 Cookie，但缺少 SUB / SUBP 字段，无法用于登录`, loggedIn: false });
-  }
-
-  // 在线验证
-  const verify = await verifyCookieOnline(cookiesToString(cookies));
-  if (verify.valid === false) {
-    // 明确无效：清掉文件，前端拿到 loggedIn=false 后会提示重新提交
-    cookieLogger.warn('手动 Cookie 在线验证失败，清空磁盘 Cookie', { error: verify.error });
-    writeJSON(COOKIE_FILE, []);
-    isLoggedIn = false;
-    return res.json({
-      success: false,
-      message: `Cookie 验证失败：${verify.error || '已失效'}`,
-      loggedIn: false,
-      verifyResult: verify,
-    });
-  }
-
-  // valid === true 或 null（网络异常）都视为已登录，保留 Cookie
   isLoggedIn = true;
+  cookieLogger.info(`✅ 已保存 ${cookies.length} 条 Cookie（未校验，用户已确认）`);
+
   res.json({
     success: true,
-    message: verify.valid === true
-      ? `Cookie 验证成功！欢迎 ${verify.name || verify.uid}`
-      : `已保存 ${cookies.length} 条 Cookie（验证服务暂不可用，已乐观接受）`,
+    message: `已保存 ${cookies.length} 条 Cookie，若实际未登录可点「重新登录」`,
     loggedIn: true,
-    verifyResult: verify,
   });
 });
 
