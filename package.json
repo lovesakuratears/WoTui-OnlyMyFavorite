@@ -1,6 +1,6 @@
 {
   "name": "wotui-onlymyfavorite",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "WoTui - 订阅你喜欢的微博用户，本地归档帖子内容（文字+图片）",
   "main": "server.js",
   "scripts": {

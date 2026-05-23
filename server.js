@@ -1,5 +1,5 @@
 /**
- * server.js - WoTui · OnlyMyFavorite 后端服务 v0.3.0
+ * server.js - WoTui · OnlyMyFavorite 后端服务 v0.4.0
  *
  * 变更记录：
  *   v0.3.0 - 项目改名 WoTui / Docker 支持 / Demo 数据 / 现代化 UI
@@ -27,6 +27,19 @@ const axios = require('axios');
 
 const app = express();
 const PORT = 3000;
+
+// ─── 运行环境检测 ──────────────────────────────────────────────────────────────
+// Docker / 无 DISPLAY 环境无法弹出有头浏览器，需引导用户使用手动 Cookie 模式
+function detectHeadlessOnlyEnv() {
+  if (process.env.WOTUI_HEADED === '1') return false; // 显式覆盖
+  if (process.env.WOTUI_DOCKER === '1') return true;
+  if (process.platform === 'linux' && !process.env.DISPLAY) return true;
+  try {
+    if (fs.existsSync('/.dockerenv')) return true;
+  } catch (_) {}
+  return false;
+}
+const IS_HEADLESS_ONLY = detectHeadlessOnlyEnv();
 
 // ─── 目录初始化 ────────────────────────────────────────────────────────────────
 
@@ -125,7 +138,7 @@ function createLogger(module_) {
 }
 
 const logger = createLogger('App');
-logger.info('微博归档器 v0.2.0 启动中...', { logLevel: Object.keys(LOG_LEVELS).find(k => LOG_LEVELS[k] === CURRENT_LOG_LEVEL) });
+logger.info('微博归档器 v0.4.0 启动中...', { logLevel: Object.keys(LOG_LEVELS).find(k => LOG_LEVELS[k] === CURRENT_LOG_LEVEL) });
 
 // ─── 中间件 ────────────────────────────────────────────────────────────────────
 
@@ -587,14 +600,20 @@ async function openLoginWindow() {
     if (!pendingLoginContext) return; // 已被 confirmLogin 处理
     clearTimeout(timeoutTimer);
     loginLogger.info('用户手动关闭了登录窗口（未确认）');
-    // 也尝试采集一次 Cookie
+    // 也尝试采集一次 Cookie，但必须在线验证通过才保存
     try {
       const cookies = await context.cookies().catch(() => []);
       if (checkLoginFromCookies(cookies)) {
-        saveCookies(cookies);
-        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: '窗口已关闭，Cookie 已自动保存' })}\n\n`;
-        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
-        isLoggedIn = true;
+        const verify = await verifyCookieOnline(cookies);
+        if (verify.valid === true) {
+          saveCookies(cookies);
+          isLoggedIn = true;
+          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: `窗口已关闭，登录成功（${verify.name || verify.uid}）`, userInfo: verify })}\n\n`;
+          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+        } else {
+          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: `窗口已关闭，Cookie 验证未通过：${verify.error || '请重新登录'}` })}\n\n`;
+          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+        }
       } else {
         const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未检测到登录 Cookie' })}\n\n`;
         for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
@@ -712,6 +731,20 @@ async function browserFetch(url, cookies, referer) {
       const data = JSON.parse(text);
       return { ok: true, status, data };
     } catch (_) {
+      // 非 JSON 响应 — 检查是否为登录页 HTML（status 通常为 200 但内容是 passport 登录页）
+      const loginMarkers = [
+        'window.use_fp',          // passport.weibo.com 反爬指纹脚本
+        '扫描二维码登录',
+        '账号登录',
+        '请登录后访问',
+        'passport.weibo.com',
+        'login.sina.com.cn',
+      ];
+      const looksLikeLoginPage = loginMarkers.some(m => text.includes(m));
+      if (looksLikeLoginPage) {
+        bfLogger.warn('响应为微博登录页 HTML，判定 Cookie 已失效', { preview: text.slice(0, 120) });
+        return { ok: false, status, data: null, loginRequired: true };
+      }
       bfLogger.warn('响应不是有效 JSON', { preview: text.slice(0, 200) });
       return { ok: false, status, data: null, rawText: text };
     }
@@ -1555,6 +1588,7 @@ app.get('/api/auth/status', async (req, res) => {
         ? new Date(cookies[0].expires * 1000).toISOString()
         : null,
       verifyResult: verifyResult || undefined,
+      headlessOnly: IS_HEADLESS_ONLY,
     }
   });
 });
@@ -1563,6 +1597,16 @@ app.get('/api/auth/status', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   if (checkLoginFromCookies(loadCookies())) {
     return res.json({ success: true, message: '已登录，无需重新登录', alreadyLoggedIn: true });
+  }
+
+  // Docker / 无 DISPLAY 环境无法弹出浏览器窗口，引导用户用手动 Cookie 模式
+  if (IS_HEADLESS_ONLY) {
+    loginLogger.warn('当前为无图形界面环境（Docker 等），拒绝打开浏览器窗口');
+    return res.status(400).json({
+      success: false,
+      headlessOnly: true,
+      error: '当前运行在 Docker / 无图形界面环境，无法弹出浏览器窗口。请切换到「手动粘贴 Cookie」标签，或使用 tools/cookie-helper.html 从本机浏览器导出 m.weibo.cn 的 Cookie 提交。',
+    });
   }
 
   // 如果已有待确认的登录窗口，直接返回
@@ -1627,10 +1671,21 @@ app.post('/api/auth/confirm-login', async (req, res) => {
       return res.json({ success: true, message: `登录成功！欢迎 ${verifyResult.name || verifyResult.uid}`, userInfo: verifyResult });
 
     } else if (verifyResult.valid === false) {
-      loginLogger.warn('Cookie 在线验证失败，但已保存', { error: verifyResult.error });
-      isLoggedIn = true; // Cookie 已保存，乐观接受
+      // 明确验证失败：清空已保存的 Cookie，避免下次启动伪登录态
+      loginLogger.warn('Cookie 在线验证失败，清空磁盘 Cookie', { error: verifyResult.error });
+      writeJSON(COOKIE_FILE, []);
+      isLoggedIn = false;
+      // 同步推送登录失败结果，前端能及时反馈
+      const ssePayload = `data: ${JSON.stringify({
+        type: 'loginResult', success: false,
+        message: verifyResult.error || 'Cookie 验证失败，请重新登录',
+      })}\n\n`;
+      for (const client of sseClients) { try { client.write(ssePayload); } catch (_) {} }
       await closePendingLogin();
-      return res.json({ success: true, message: `Cookie 已保存，但验证失败（${verifyResult.error}）`, userInfo: {} });
+      return res.json({
+        success: false,
+        error: verifyResult.error || 'Cookie 验证失败，请确认已在浏览器中完成登录后再点击',
+      });
 
     } else {
       // valid === null：网络异常，降级接受
@@ -1674,25 +1729,42 @@ app.post('/api/auth/set-cookie', async (req, res) => {
     if (idx === -1) return null;
     const name = pair.slice(0, idx).trim();
     const value = pair.slice(idx + 1).trim();
-    return name ? { name, value, domain: '.weibo.com', path: '/', sameSite: 'Lax' } : null;
+    return name ? { name, value, domain: '.weibo.cn', path: '/', sameSite: 'Lax' } : null;
   }).filter(Boolean);
 
   saveCookies(cookies);
 
   const hasSUB = cookies.some(c => c.name === 'SUB' || c.name === 'SUBP');
   if (!hasSUB) {
-    return res.json({ success: true, message: `已保存 ${cookies.length} 条 Cookie，但未找到 SUB/SUBP 字段，可能无法正常使用`, loggedIn: false });
+    // 没有关键 Cookie，直接清空以免伪登录态
+    writeJSON(COOKIE_FILE, []);
+    isLoggedIn = false;
+    return res.json({ success: false, error: `已收到 ${cookies.length} 条 Cookie，但缺少 SUB / SUBP 字段，无法用于登录`, loggedIn: false });
   }
 
   // 在线验证
   const verify = await verifyCookieOnline(cookiesToString(cookies));
-  isLoggedIn = verify.valid !== false;
+  if (verify.valid === false) {
+    // 明确无效：清掉文件，前端拿到 loggedIn=false 后会提示重新提交
+    cookieLogger.warn('手动 Cookie 在线验证失败，清空磁盘 Cookie', { error: verify.error });
+    writeJSON(COOKIE_FILE, []);
+    isLoggedIn = false;
+    return res.json({
+      success: false,
+      message: `Cookie 验证失败：${verify.error || '已失效'}`,
+      loggedIn: false,
+      verifyResult: verify,
+    });
+  }
+
+  // valid === true 或 null（网络异常）都视为已登录，保留 Cookie
+  isLoggedIn = true;
   res.json({
     success: true,
     message: verify.valid === true
       ? `Cookie 验证成功！欢迎 ${verify.name || verify.uid}`
-      : `已保存 ${cookies.length} 条 Cookie（${verify.error || '验证跳过'}）`,
-    loggedIn: isLoggedIn,
+      : `已保存 ${cookies.length} 条 Cookie（验证服务暂不可用，已乐观接受）`,
+    loggedIn: true,
     verifyResult: verify,
   });
 });
@@ -2102,7 +2174,7 @@ app.get('/api/profile/:uid', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     success: true,
-    version: '0.3.0',
+    version: '0.4.0',
     uptime: Math.floor(process.uptime()),
     loggedIn: getLoginStatus(),
     subscriptions: readJSON(SUBSCRIPTIONS_FILE, []).length,
@@ -2110,6 +2182,7 @@ app.get('/api/health', (req, res) => {
     logFile: getLogFilePath(),
     rateLimits: RATE_LIMIT,
     cacheSize: postCache.size,
+    headlessOnly: IS_HEADLESS_ONLY,
   });
 });
 
@@ -2117,7 +2190,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
   logger.info(`╔══════════════════════════════════════════╗`);
-  logger.info(`║   微博归档器 v0.2.0  已启动              ║`);
+  logger.info(`║   微博归档器 v0.4.0  已启动              ║`);
   logger.info(`║   http://localhost:${PORT}                  ║`);
   logger.info(`╚══════════════════════════════════════════╝`);
 
@@ -2127,6 +2200,10 @@ app.listen(PORT, () => {
     logger.info(`✅ 已检测到登录态`, { cookieCount: cookies.length });
   } else {
     logger.warn(`⚠️  未登录，请访问 http://localhost:${PORT} 并点击"登录微博"按钮`);
+  }
+
+  if (IS_HEADLESS_ONLY) {
+    logger.warn(`🐳 检测到 Docker / 无 DISPLAY 环境，自动登录已禁用，请使用「手动粘贴 Cookie」方式登录`);
   }
 
   restoreSchedulers();

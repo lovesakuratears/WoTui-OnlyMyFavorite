@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WoTui Cookie 助手 · m.weibo.cn</title>
+  <style>
+    :root {
+      --bg: #0f0f1a;
+      --bg-surface: #1a1a2e;
+      --bg-elev: #222238;
+      --border: #2a2a44;
+      --border-strong: #3a3a55;
+      --text: #e5e7eb;
+      --text-muted: #94a3b8;
+      --text-faint: #64748b;
+      --primary: #ff3366;
+      --primary-mid: rgba(255, 51, 102, 0.12);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --error: #ef4444;
+      --gradient: linear-gradient(135deg, #ff3366 0%, #ee0979 100%);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: linear-gradient(135deg, #0f0f1a 0%, #16213e 100%);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      min-height: 100vh;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .container { max-width: 760px; margin: 0 auto; padding: 32px 24px 80px; }
+    .app-header { display: flex; align-items: center; gap: 14px; margin-bottom: 28px; }
+    .logo {
+      width: 44px; height: 44px; border-radius: 10px;
+      background: var(--gradient);
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-weight: 800; font-size: 20px;
+      box-shadow: 0 6px 20px rgba(255, 51, 102, 0.3);
+    }
+    h1 { margin: 0; font-size: 22px; font-weight: 700; }
+    .subtitle { color: var(--text-muted); font-size: 13px; margin-top: 2px; }
+    .step {
+      background: rgba(26, 26, 46, 0.6);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 20px 22px;
+      margin-bottom: 18px;
+    }
+    .step h2 {
+      margin: 0 0 12px; font-size: 15px; font-weight: 600;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .step-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: var(--gradient);
+      color: #fff; font-size: 12px; font-weight: 700;
+    }
+    details summary {
+      cursor: pointer; color: var(--text-muted);
+      font-size: 13px; padding: 4px 0; user-select: none;
+    }
+    details summary:hover { color: var(--text); }
+    details[open] summary { color: var(--text); margin-bottom: 8px; }
+    details ol { margin: 8px 0 4px; padding-left: 22px; color: var(--text-muted); font-size: 13px; }
+    details ol li { margin-bottom: 4px; }
+    details code {
+      background: var(--bg-elev); padding: 1px 6px;
+      border-radius: 4px; font-size: 12px;
+      color: #ffb7c5; font-family: "SF Mono", Monaco, Consolas, monospace;
+    }
+    details a { color: #93c5fd; text-decoration: none; }
+    details a:hover { text-decoration: underline; }
+    .method-block {
+      background: var(--bg-elev);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin-top: 8px;
+    }
+    .method-title { font-size: 12px; font-weight: 600; color: var(--primary); margin-bottom: 4px; }
+    .banner {
+      background: rgba(245, 158, 11, 0.08);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #fcd34d;
+      padding: 10px 14px;
+      border-radius: 8px;
+      font-size: 12.5px;
+      margin-bottom: 18px;
+      display: flex; align-items: flex-start; gap: 8px;
+    }
+    textarea {
+      width: 100%; min-height: 130px; padding: 12px;
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-family: "SF Mono", Monaco, Consolas, monospace;
+      font-size: 12.5px; resize: vertical; outline: none;
+      transition: border-color .15s;
+    }
+    textarea:focus { border-color: var(--primary); }
+    textarea::placeholder { color: var(--text-faint); }
+    input[type=text], input[type=url] {
+      padding: 8px 12px;
+      background: var(--bg-surface); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text);
+      font-size: 13px; outline: none; flex: 1;
+      transition: border-color .15s;
+    }
+    input[type=text]:focus, input[type=url]:focus { border-color: var(--primary); }
+    .btn {
+      padding: 8px 18px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 600; cursor: pointer;
+      transition: all .15s;
+      display: inline-flex; align-items: center; gap: 6px;
+    }
+    .btn-primary {
+      background: var(--gradient); color: #fff;
+      box-shadow: 0 4px 12px rgba(255, 51, 102, 0.3);
+    }
+    .btn-primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(255, 51, 102, 0.4); }
+    .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-ghost {
+      background: transparent; color: var(--text-muted);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover:not(:disabled) { background: var(--bg-surface); color: var(--text); border-color: var(--border-strong); }
+    .actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .tabs {
+      display: flex; gap: 4px; margin-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      padding: 8px 16px; background: transparent;
+      border: none; border-bottom: 2px solid transparent;
+      color: var(--text-muted); font-size: 13px; font-weight: 500;
+      cursor: pointer; transition: all .15s; margin-bottom: -1px;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    .row label { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
+    .cookie-list {
+      max-height: 200px; overflow-y: auto;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      border-radius: 8px; padding: 6px; margin-bottom: 12px;
+    }
+    .cookie-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 5px 8px; border-radius: 5px;
+      font-family: "SF Mono", Monaco, Consolas, monospace;
+      font-size: 11.5px;
+    }
+    .cookie-row + .cookie-row { margin-top: 2px; }
+    .cookie-row.required { background: rgba(255, 51, 102, 0.08); }
+    .cookie-name { font-weight: 700; color: var(--primary); min-width: 130px; flex-shrink: 0; }
+    .cookie-row.optional .cookie-name { color: var(--text-muted); font-weight: 500; }
+    .cookie-value { color: var(--text-faint); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .alert {
+      padding: 10px 14px; border-radius: 8px;
+      font-size: 13px; margin: 10px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .alert.success { background: rgba(16, 185, 129, 0.1); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .alert.error { background: rgba(239, 68, 68, 0.1); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
+    .alert.warn { background: rgba(245, 158, 11, 0.1); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .alert.info { background: rgba(99, 102, 241, 0.1); color: #c7d2fe; border: 1px solid rgba(99, 102, 241, 0.3); }
+    .hidden { display: none !important; }
+    .spinner {
+      width: 14px; height: 14px;
+      border: 2px solid rgba(255,255,255,0.2);
+      border-top-color: #fff; border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .quick-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .quick-link {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      padding: 4px 10px; border-radius: 14px;
+      font-size: 11px; color: var(--text-muted);
+      cursor: pointer; transition: all .15s;
+    }
+    .quick-link:hover { background: var(--bg-surface); color: var(--text); border-color: var(--primary); }
+    .footer-note {
+      text-align: center; color: var(--text-faint);
+      font-size: 12px; margin-top: 28px;
+      padding-top: 18px; border-top: 1px solid var(--border);
+    }
+    .footer-note code {
+      background: var(--bg-elev); padding: 1px 6px;
+      border-radius: 4px; font-size: 11.5px; color: #ffb7c5;
+    }
+    .version-tag {
+      display: inline-block;
+      background: var(--bg-elev); border: 1px solid var(--border);
+      padding: 2px 8px; border-radius: 10px;
+      font-size: 11px; color: var(--text-muted);
+      margin-left: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="app-header">
+      <div class="logo">W</div>
+      <div>
+        <h1>WoTui Cookie 助手<span class="version-tag">v0.4.0</span></h1>
+        <div class="subtitle">在物理机浏览器导出 <strong>m.weibo.cn</strong>（移动版微博）Cookie，一键推送到 Docker 实例</div>
+      </div>
+    </div>
+
+    <div class="banner">
+      <span>⚠️</span>
+      <div>
+        <strong>必须使用 m.weibo.cn（移动版），不要用 weibo.com（PC 版）。</strong><br/>
+        PC 版有强反爬机制，Cookie 即使保存也会被服务端拦截。WoTui 后端验证接口走的也是 <code>m.weibo.cn/api/config</code>。
+      </div>
+    </div>
+
+    <!-- Step 1 -->
+    <section class="step">
+      <h2><span class="step-num">1</span>从浏览器获取 m.weibo.cn Cookie</h2>
+      <details open>
+        <summary>展开 / 收起获取步骤</summary>
+        <div class="method-block">
+          <div class="method-title">方法 A（最推荐 · 一行搞定）</div>
+          <ol>
+            <li>在浏览器中打开 <a href="https://m.weibo.cn" target="_blank" rel="noopener">https://m.weibo.cn</a> 并完成登录（PC 浏览器也可直接打开，页面是移动版样式）</li>
+            <li>按 <code>F12</code>（Mac 上为 <code>⌥⌘I</code>）打开开发者工具</li>
+            <li>切到 <code>Console</code> 标签，输入 <code>document.cookie</code> 回车</li>
+            <li>复制返回的完整字符串（去掉首尾引号即可），粘贴到下方步骤 2</li>
+          </ol>
+        </div>
+        <div class="method-block">
+          <div class="method-title">方法 B（DevTools Application 面板）</div>
+          <ol>
+            <li>打开 DevTools → <code>Application</code> → 左侧 <code>Cookies</code> → 选择 <code>https://m.weibo.cn</code></li>
+            <li>至少复制 <code>SUB</code>、<code>SUBP</code>、<code>_T_WM</code>、<code>MLOGIN</code> 四项</li>
+            <li>按 <code>name=value; name=value</code> 拼接粘贴下方</li>
+          </ol>
+        </div>
+        <div class="method-block">
+          <div class="method-title">方法 C（浏览器扩展导出 JSON）</div>
+          <ol>
+            <li>安装 EditThisCookie / Cookie-Editor 类扩展</li>
+            <li>在 <code>m.weibo.cn</code> 页面上点扩展图标 → Export</li>
+            <li>粘贴下方，本工具自动识别 JSON 格式</li>
+          </ol>
+        </div>
+      </details>
+    </section>
+
+    <!-- Step 2 -->
+    <section class="step">
+      <h2><span class="step-num">2</span>粘贴 Cookie</h2>
+      <textarea id="cookieInput" placeholder="支持以下三种格式，工具自动识别：
+
+格式 ①  document.cookie 字符串（来自 m.weibo.cn）：
+SUB=_2A25...; SUBP=0033WrSXqPxfM9...; _T_WM=abc; MLOGIN=1; XSRF-TOKEN=...
+
+格式 ②  JSON 数组（来自 Cookie 编辑器扩展）：
+[{&quot;name&quot;:&quot;SUB&quot;,&quot;value&quot;:&quot;_2A25...&quot;,&quot;domain&quot;:&quot;.weibo.cn&quot;}, ...]
+
+格式 ③  Cookie 请求头：
+Cookie: SUB=_2A25...; SUBP=..."></textarea>
+      <div class="actions">
+        <button class="btn btn-primary" id="parseBtn">🔍 解析并校验</button>
+        <button class="btn btn-ghost" id="clearBtn">清空</button>
+      </div>
+    </section>
+
+    <!-- Step 3 -->
+    <section class="step hidden" id="parseResult">
+      <h2><span class="step-num">3</span>解析结果</h2>
+      <div id="cookieList" class="cookie-list"></div>
+      <div id="validation"></div>
+    </section>
+
+    <!-- Step 4 -->
+    <section class="step hidden" id="importStep">
+      <h2><span class="step-num">4</span>导入到 WoTui</h2>
+      <div class="tabs">
+        <button class="tab active" data-mode="auto">🚀 一键导入 Docker 实例</button>
+        <button class="tab" data-mode="manual">📋 复制 Cookie 手动粘贴</button>
+      </div>
+
+      <div class="tab-pane" data-mode="auto">
+        <div class="row">
+          <label>Docker URL</label>
+          <input type="url" id="dockerUrl" placeholder="http://localhost:3000" value="http://localhost:3000" />
+        </div>
+        <div class="quick-links">
+          <span class="quick-link" data-url="http://localhost:3000">localhost:3000</span>
+          <span class="quick-link" data-url="http://127.0.0.1:3000">127.0.0.1:3000</span>
+          <span class="quick-link" data-url="http://host.docker.internal:3000">host.docker.internal:3000</span>
+        </div>
+        <div class="actions">
+          <button class="btn btn-ghost" id="testConn">🔌 测试连接</button>
+          <button class="btn btn-primary" id="importBtn">⬇ 一键导入并校验</button>
+        </div>
+        <div id="importResult"></div>
+      </div>
+
+      <div class="tab-pane hidden" data-mode="manual">
+        <div class="alert info">
+          复制下方 Cookie 字符串，粘贴到 WoTui 网页登录弹窗的「手动粘贴 Cookie」标签。
+        </div>
+        <textarea id="manualOutput" readonly></textarea>
+        <div class="actions">
+          <button class="btn btn-primary" id="copyBtn">📋 复制到剪贴板</button>
+          <button class="btn btn-ghost" id="copyJsonBtn">复制 JSON 格式</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer-note">
+      本工具完全运行在本地浏览器，<strong>不会上传任何数据到第三方</strong>。<br/>
+      所有 HTTP 请求都直接发往你填写的 Docker URL（默认 <code>localhost:3000</code>）。<br/>
+      Cookie 域默认设为 <code>.weibo.cn</code>，与后端验证接口 <code>m.weibo.cn/api/config</code> 一致。
+    </div>
+  </div>
+
+  <script>
+    'use strict';
+
+    const REQUIRED_NAMES = ['SUB'];
+    const KEY_NAMES = ['SUB', 'SUBP', '_T_WM', 'MLOGIN', 'SUHB', 'XSRF-TOKEN', 'M_WEIBOCN_PARAMS', 'WEIBOCN_FROM', 'ALF', 'SCF'];
+
+    function $(id) { return document.getElementById(id); }
+
+    function parseCookies(text) {
+      text = (text || '').trim();
+      if (!text) return [];
+
+      if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+        text = text.slice(1, -1);
+      }
+
+      if (text.startsWith('[')) {
+        try {
+          const arr = JSON.parse(text);
+          if (Array.isArray(arr)) {
+            return arr
+              .map(c => ({
+                name: (c.name || c.Name || '').trim(),
+                value: (c.value || c.Value || '').toString().trim(),
+                domain: c.domain || c.Domain || '.weibo.cn',
+                path: c.path || c.Path || '/',
+              }))
+              .filter(c => c.name && c.value);
+          }
+        } catch (_) { /* fall through */ }
+      }
+
+      const stripped = text.replace(/^cookie:\s*/i, '');
+      const pairs = stripped.split(/;\s*/);
+      const cookies = [];
+      const seen = new Set();
+      for (const pair of pairs) {
+        const idx = pair.indexOf('=');
+        if (idx <= 0) continue;
+        const name = pair.slice(0, idx).trim();
+        const value = pair.slice(idx + 1).trim();
+        if (!name || !value) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        cookies.push({ name, value, domain: '.weibo.cn', path: '/' });
+      }
+      return cookies;
+    }
+
+    function validateCookies(cookies) {
+      if (!cookies.length) return { ok: false, reason: '没有解析到任何 Cookie，请检查粘贴内容' };
+      const names = new Set(cookies.map(c => c.name));
+      const missing = REQUIRED_NAMES.filter(n => !names.has(n));
+      if (missing.length) return { ok: false, reason: `缺少必需字段：${missing.join(', ')}（请确认 m.weibo.cn 已登录）` };
+      const sub = cookies.find(c => c.name === 'SUB');
+      if (sub && sub.value.length < 20) return { ok: false, reason: `SUB 值过短（${sub.value.length} 字符），疑似无效` };
+
+      const warnings = [];
+      if (!names.has('MLOGIN')) warnings.push('未检测到 MLOGIN（m.weibo.cn 移动登录标记）');
+      if (!names.has('_T_WM')) warnings.push('未检测到 _T_WM（m 站访问标识，部分接口需要）');
+      return { ok: true, warnings };
+    }
+
+    function toCookieString(cookies) {
+      return cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    }
+
+    function renderCookieList(cookies) {
+      const list = $('cookieList');
+      list.innerHTML = '';
+      cookies.forEach(c => {
+        const required = KEY_NAMES.includes(c.name);
+        const row = document.createElement('div');
+        row.className = 'cookie-row ' + (required ? 'required' : 'optional');
+        const preview = c.value.length > 50 ? c.value.slice(0, 50) + '...' : c.value;
+        row.innerHTML = `<span class="cookie-name">${escapeHtml(c.name)}</span><span class="cookie-value">${escapeHtml(preview)}</span>`;
+        list.appendChild(row);
+      });
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, m => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[m]));
+    }
+
+    function showAlert(container, type, msg) {
+      container.innerHTML = `<div class="alert ${type}">${msg}</div>`;
+    }
+
+    let parsedCookies = [];
+
+    $('parseBtn').onclick = function() {
+      parsedCookies = parseCookies($('cookieInput').value);
+      const validation = validateCookies(parsedCookies);
+
+      $('parseResult').classList.remove('hidden');
+      renderCookieList(parsedCookies);
+
+      if (validation.ok) {
+        let msg = `✓ 已识别 <strong>${parsedCookies.length}</strong> 个 Cookie，包含必需的 SUB，可以导入`;
+        if (validation.warnings && validation.warnings.length) {
+          msg += `<br/><span style="color:#fcd34d">提示：${validation.warnings.join('；')}</span>`;
+        }
+        showAlert($('validation'), 'success', msg);
+        $('importStep').classList.remove('hidden');
+        $('manualOutput').value = toCookieString(parsedCookies);
+        $('importResult').innerHTML = '';
+      } else {
+        showAlert($('validation'), 'error', `✗ ${validation.reason}`);
+        $('importStep').classList.add('hidden');
+      }
+    };
+
+    $('clearBtn').onclick = function() {
+      $('cookieInput').value = '';
+      $('parseResult').classList.add('hidden');
+      $('importStep').classList.add('hidden');
+      parsedCookies = [];
+    };
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.onclick = function() {
+        const mode = tab.dataset.mode;
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('hidden', p.dataset.mode !== mode));
+      };
+    });
+
+    document.querySelectorAll('.quick-link').forEach(el => {
+      el.onclick = function() { $('dockerUrl').value = el.dataset.url; };
+    });
+
+    function normalizeUrl(u) {
+      u = (u || '').trim();
+      if (!u) return '';
+      if (!/^https?:\/\//i.test(u)) u = 'http://' + u;
+      return u.replace(/\/+$/, '');
+    }
+
+    $('testConn').onclick = async function() {
+      const url = normalizeUrl($('dockerUrl').value);
+      if (!url) { showAlert($('importResult'), 'error', '请填写 Docker URL'); return; }
+      $('testConn').disabled = true;
+      showAlert($('importResult'), 'info', '<span class="spinner"></span> 正在测试连接…');
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const r = await fetch(url + '/api/health', { signal: ctrl.signal });
+        clearTimeout(t);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        const ver = data.version || '?';
+        const headless = data.headlessOnly ? '是（Docker / 无 GUI）' : '否';
+        const subs = data.subscriptions ?? '?';
+        const logged = data.loggedIn ? '✓ 已登录' : '未登录';
+        showAlert($('importResult'), 'success',
+          `✓ 连接成功 · 版本 <strong>${escapeHtml(ver)}</strong> · 无头模式：${headless} · 订阅数：${subs} · 当前状态：${logged}`);
+      } catch (e) {
+        const hint = String(e.message || e).includes('aborted')
+          ? '请求超时（5 秒），请检查 URL、容器是否启动、端口是否映射'
+          : `${e.message || e}`;
+        showAlert($('importResult'), 'error', `✗ 连接失败：${hint}`);
+      } finally {
+        $('testConn').disabled = false;
+      }
+    };
+
+    $('importBtn').onclick = async function() {
+      if (!parsedCookies.length) {
+        showAlert($('importResult'), 'error', '请先在步骤 2 解析并校验 Cookie');
+        return;
+      }
+      const url = normalizeUrl($('dockerUrl').value);
+      if (!url) { showAlert($('importResult'), 'error', '请填写 Docker URL'); return; }
+
+      $('importBtn').disabled = true;
+      showAlert($('importResult'), 'info', '<span class="spinner"></span> 正在导入并在线验证（约 5–15 秒）…');
+
+      try {
+        const cookieStr = toCookieString(parsedCookies);
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 20000);
+        const r = await fetch(url + '/api/auth/set-cookie', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ cookie: cookieStr }),
+          signal: ctrl.signal,
+        });
+        clearTimeout(t);
+        const data = await r.json().catch(() => ({}));
+        if (data.success) {
+          const msg = data.message || '已成功保存 Cookie 并通过在线验证';
+          showAlert($('importResult'), 'success', `✓ ${escapeHtml(msg)}<br/>现在可以回到 WoTui 网页（${escapeHtml(url)}）刷新查看登录态。`);
+        } else {
+          const err = data.error || data.message || '未知错误';
+          showAlert($('importResult'), 'error', `✗ 导入失败：${escapeHtml(err)}`);
+        }
+      } catch (e) {
+        const hint = String(e.message || e).includes('aborted')
+          ? '请求超时（20 秒），可能是验证微博接口不通'
+          : `${e.message || e}（如显示 Failed to fetch，请确认 Docker 容器允许跨域）`;
+        showAlert($('importResult'), 'error', `✗ 请求失败：${hint}`);
+      } finally {
+        $('importBtn').disabled = false;
+      }
+    };
+
+    async function copyText(text, btn, originalText) {
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (_) {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); } catch (_) {}
+        document.body.removeChild(ta);
+      }
+      btn.textContent = '✓ 已复制';
+      setTimeout(() => { btn.textContent = originalText; }, 1800);
+    }
+
+    $('copyBtn').onclick = function() {
+      copyText($('manualOutput').value, $('copyBtn'), '📋 复制到剪贴板');
+    };
+
+    $('copyJsonBtn').onclick = function() {
+      copyText(JSON.stringify(parsedCookies, null, 2), $('copyJsonBtn'), '复制 JSON 格式');
+    };
+  </script>
+</body>
+</html>

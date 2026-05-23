@@ -1,15 +1,15 @@
-﻿{
-    "date":  "2026-05-21 10:01:15",
-    "previousVersion":  "0.0.1",
-    "version":  "0.0.2",
+{
+    "date":  "2026-05-23",
+    "previousVersion":  "0.3.0",
+    "version":  "0.4.0",
     "changes":  [
-                    "新增结构化日志系统（JSON格式，按日期分文件，SSE实时推送）",
-                    "修复抓取无内容Bug（Cookie刷新逻辑重写，详细错误日志）",
-                    "新增SSE实时进度推送（取代轮询，即时显示抓取百分比）",
-                    "完善登录验证（调用微博API验证Cookie有效性，明确反馈）",
-                    "新增日志查看面板（前端实时日志面板，支持级别过滤）",
-                    "新增Cookie在线验证接口 POST /api/auth/verify",
-                    "新增系统健康检查接口 GET /api/health",
-                    "优化抓取错误处理（区分Cookie失效/网络错误/数据为空）"
+                    "修复：Docker / 无 GUI 环境检测，登录请求自动拒绝并引导手动 Cookie（解决 Playwright Missing X server）",
+                    "修复：Cookie 在线验证失败时清空磁盘，防止伪登录态（点登录显示已登录）",
+                    "修复：browserFetch 识别微博登录页 HTML（window.use_fp / 扫描二维码登录），返回 loginRequired 提示重新登录",
+                    "修复：侧边栏布局裁切（header/search/pagination 固定，列表区独立滚动；新增紧凑分页样式适配 280px 窄宽）",
+                    "新增：独立工具 tools/cookie-helper.html — 在物理机浏览器导出 m.weibo.cn Cookie，一键推送到 Docker 实例",
+                    "调整：set-cookie 端点默认 domain 改为 .weibo.cn（放弃反爬严重的 weibo.com 路径）",
+                    "新增：/api/auth/status 与 /api/health 暴露 headlessOnly 字段供前端 / 工具判断环境",
+                    "新增：LoginModal 在 headlessOnly 环境下自动切到手动 Cookie 标签并显示 Docker 提示横幅"
                 ]
 }

@@ -374,7 +374,7 @@ function ConfirmModal({ title, message, confirmText, dangerous, onConfirm, onCan
 
 // ─── 分页控件 ─────────────────────────────────────────────────────────────────
 
-function PaginationControl({ pagination, pageSizeOptions, onPageChange, onPageSizeChange, onJumpToPage }) {
+function PaginationControl({ pagination, pageSizeOptions, onPageChange, onPageSizeChange, onJumpToPage, compact = false }) {
   const [jumpInput, setJumpInput] = useState('');
   const { page, pageSize, total, totalPages } = pagination;
 
@@ -416,7 +416,7 @@ function PaginationControl({ pagination, pageSizeOptions, onPageChange, onPageSi
   };
 
   return (
-    <div className="pagination-control">
+    <div className={`pagination-control${compact ? ' compact' : ''}`}>
       <div className="page-size-section">
         <span className="page-size-label">每页</span>
         <select className="page-size-select" value={pageSize} onChange={e => onPageSizeChange(Number(e.target.value))}>
@@ -707,8 +707,8 @@ function AddSubscriptionModal({ onClose, onAdded, toast }) {
  * - 打开浏览器后显示「我已完成登录」按钮，用户手动确认
  * - 通过 SSE loginWindowOpen / loginResult 同步状态
  */
-function LoginModal({ onClose, onLoginSuccess, toast }) {
-  const [mode, setMode] = useState('auto');
+function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly }) {
+  const [mode, setMode] = useState(headlessOnly ? 'manual' : 'auto');
   const [cookieStr, setCookieStr] = useState('');
   const [loading, setLoading] = useState(false);
   const [windowOpen, setWindowOpen] = useState(false); // 登录窗口是否已打开
@@ -745,6 +745,18 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
         toast('已登录', 'success');
         onLoginSuccess();
         onClose();
+        return;
+      }
+      if (res.headlessOnly) {
+        // 服务端拒绝（Docker / 无 DISPLAY），切到手动 Cookie Tab
+        setMode('manual');
+        toast(res.error || '当前环境不支持自动登录，请改用手动 Cookie', 'warn', 6000);
+        setLoading(false);
+        return;
+      }
+      if (res.success === false) {
+        toast(res.error || '启动登录失败', 'error');
+        setLoading(false);
         return;
       }
       if (res.pending) {
@@ -804,11 +816,18 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
         </div>
 
         <div className="login-tabs">
-          <button className={`login-tab ${mode === 'auto' ? 'active' : ''}`} onClick={() => setMode('auto')}>自动登录（推荐）</button>
-          <button className={`login-tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>手动粘贴 Cookie</button>
+          {!headlessOnly && (
+            <button className={`login-tab ${mode === 'auto' ? 'active' : ''}`} onClick={() => setMode('auto')}>自动登录（推荐）</button>
+          )}
+          <button className={`login-tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>{headlessOnly ? '粘贴 Cookie 登录（Docker 环境）' : '手动粘贴 Cookie'}</button>
         </div>
 
         <div className="modal-body">
+          {headlessOnly && mode === 'manual' && (
+            <div className="login-tip" style={{marginBottom:'12px'}}>
+              🐳 检测到 Docker / 无图形界面环境，自动登录已禁用。请在本机浏览器登录 <strong>m.weibo.cn</strong>（移动版）后，复制 Cookie 到下方；或使用项目根目录 <code>tools/cookie-helper.html</code> 一键导入。
+            </div>
+          )}
           {mode === 'auto' ? (
             <div className="login-auto">
               <div className="login-icon">📱</div>
@@ -855,9 +874,9 @@ function LoginModal({ onClose, onLoginSuccess, toast }) {
           ) : (
             <div className="login-manual">
               <p className="form-hint">
-                在 Chrome 中打开并登录 <a href="https://weibo.com" target="_blank" rel="noopener">weibo.com</a>，
-                按 F12 → Application → Cookies → weibo.com，复制所有 Cookie 粘贴到下方。
-                <br/><strong>重要：确保 Cookie 中包含 SUB 和 SUBP 字段。</strong>
+                在浏览器中打开并登录 <a href="https://m.weibo.cn" target="_blank" rel="noopener">m.weibo.cn</a>（<strong>移动版</strong>，PC 版反爬严重不要用），
+                按 F12 → Console → 输入 <code>document.cookie</code> 回车，复制返回的字符串粘贴到下方。
+                <br/><strong>重要：Cookie 必须包含 SUB 字段；推荐同时包含 MLOGIN、_T_WM。</strong>
               </p>
               <label className="form-label">Cookie 字符串</label>
               <textarea className="form-textarea" rows={5}
@@ -981,6 +1000,7 @@ function EmptyState({ loggedIn, onAddClick, onLoginClick }) {
 function App() {
   const { toasts, show: toast } = useToast();
   const [loggedIn, setLoggedIn] = useState(false);
+  const [headlessOnly, setHeadlessOnly] = useState(false);
   const [serverDown, setServerDown] = useState(false);
   const [subscriptions, setSubscriptions] = useState([]);
   const [fetchStatuses, setFetchStatuses] = useState({}); // uid -> status obj (来自 SSE)
@@ -1059,7 +1079,11 @@ function App() {
   const refreshAuth = async () => {
     try {
       const res = await API.authStatus();
-      if (res.success) { setLoggedIn(res.data.loggedIn); setServerDown(false); }
+      if (res.success) {
+        setLoggedIn(res.data.loggedIn);
+        setHeadlessOnly(!!res.data.headlessOnly);
+        setServerDown(false);
+      }
     } catch (_) { setServerDown(true); }
   };
 
@@ -1283,18 +1307,22 @@ function App() {
 
           {pagedSubs.length === 0
             ? <div className="sidebar-empty">暂无订阅</div>
-            : pagedSubs.map(sub => (
-                <SidebarItem key={sub.uid} sub={sub} isActive={sub.uid === activeUid}
-                  onClick={() => {
-                    if (sub.uid !== activeUid) {
-                      setActiveUid(sub.uid);
-                      setPosts([]);
-                      // 退出搜索模式
-                      if (searchMode) handleClearSearch();
-                    }
-                  }}
-                  onDelete={handleDeleteSub} onFetch={refreshSubscriptions} toast={toast} />
-              ))
+            : (
+              <div className="sidebar-list">
+                {pagedSubs.map(sub => (
+                  <SidebarItem key={sub.uid} sub={sub} isActive={sub.uid === activeUid}
+                    onClick={() => {
+                      if (sub.uid !== activeUid) {
+                        setActiveUid(sub.uid);
+                        setPosts([]);
+                        // 退出搜索模式
+                        if (searchMode) handleClearSearch();
+                      }
+                    }}
+                    onDelete={handleDeleteSub} onFetch={refreshSubscriptions} toast={toast} />
+                ))}
+              </div>
+            )
           }
 
           {/* v0.2.0：订阅列表分页 */}
@@ -1305,6 +1333,7 @@ function App() {
               onPageChange={handleSubsPageChange}
               onPageSizeChange={handleSubsPageSizeChange}
               onJumpToPage={handleSubsPageChange}
+              compact={true}
             />
           )}
         </aside>
@@ -1475,7 +1504,7 @@ function App() {
       </div>
 
       {showAddModal && <AddSubscriptionModal onClose={() => setShowAddModal(false)} onAdded={refreshSubscriptions} toast={toast} />}
-      {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onLoginSuccess={() => { setLoggedIn(true); refreshAuth(); }} toast={toast} />}
+      {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onLoginSuccess={() => { setLoggedIn(true); refreshAuth(); }} toast={toast} headlessOnly={headlessOnly} />}
       {showLogs && <LogPanel onClose={() => setShowLogs(false)} />}
       <ToastContainer toasts={toasts} />
     </div>
