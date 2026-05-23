@@ -707,8 +707,10 @@ function AddSubscriptionModal({ onClose, onAdded, toast }) {
  * - 打开浏览器后显示「我已完成登录」按钮，用户手动确认
  * - 通过 SSE loginWindowOpen / loginResult 同步状态
  */
-function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly }) {
-  const [mode, setMode] = useState(headlessOnly ? 'manual' : 'auto');
+function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMissing: initialPlaywrightMissing }) {
+  const [playwrightMissing, setPlaywrightMissing] = useState(!!initialPlaywrightMissing);
+  const autoDisabled = headlessOnly || playwrightMissing;
+  const [mode, setMode] = useState(autoDisabled ? 'manual' : 'auto');
   const [cookieStr, setCookieStr] = useState('');
   const [loading, setLoading] = useState(false);
   const [windowOpen, setWindowOpen] = useState(false); // 登录窗口是否已打开
@@ -730,6 +732,11 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly }) {
         onLoginSuccess();
         setTimeout(onClose, 1200);
       } else {
+        if (data.playwrightMissing) {
+          setPlaywrightMissing(true);
+          setMode('manual');
+          setLoading(false);
+        }
         setVerifyResult({ valid: false, error: data.message });
         toast(data.message || '登录失败', 'error');
       }
@@ -751,6 +758,14 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly }) {
         // 服务端拒绝（Docker / 无 DISPLAY），切到手动 Cookie Tab
         setMode('manual');
         toast(res.error || '当前环境不支持自动登录，请改用手动 Cookie', 'warn', 6000);
+        setLoading(false);
+        return;
+      }
+      if (res.playwrightMissing) {
+        // Chromium 浏览器二进制缺失，切到手动 Cookie Tab
+        setPlaywrightMissing(true);
+        setMode('manual');
+        toast(res.error || 'Playwright Chromium 未安装，请运行 npx playwright install chromium', 'error', 8000);
         setLoading(false);
         return;
       }
@@ -816,13 +831,20 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly }) {
         </div>
 
         <div className="login-tabs">
-          {!headlessOnly && (
+          {!autoDisabled && (
             <button className={`login-tab ${mode === 'auto' ? 'active' : ''}`} onClick={() => setMode('auto')}>自动登录（推荐）</button>
           )}
-          <button className={`login-tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>{headlessOnly ? '粘贴 Cookie 登录（Docker 环境）' : '手动粘贴 Cookie'}</button>
+          <button className={`login-tab ${mode === 'manual' ? 'active' : ''}`} onClick={() => setMode('manual')}>{autoDisabled ? '粘贴 Cookie 登录' : '手动粘贴 Cookie'}</button>
         </div>
 
         <div className="modal-body">
+          {playwrightMissing && (
+            <div className="login-tip" style={{marginBottom:'12px',background:'#fff4e5',border:'1px solid #ffb74d',padding:'10px 12px',borderRadius:'6px'}}>
+              ⚠️ <strong>Playwright Chromium 浏览器未安装</strong>，自动登录已禁用。<br/>
+              请在 WoTui 项目目录运行：<code>npx playwright install chromium</code>（约 150MB，仅需一次）。<br/>
+              或使用本机工具一键导出 Cookie：双击 <code>tools/导出Cookie-Mac.command</code> / <code>tools/导出Cookie-Windows.bat</code>。
+            </div>
+          )}
           {headlessOnly && mode === 'manual' && (
             <div className="login-tip" style={{marginBottom:'12px'}}>
               🐳 检测到 Docker / 无图形界面环境，自动登录已禁用。请在本机浏览器登录 <strong>m.weibo.cn</strong>（移动版）后，复制 Cookie 到下方；或使用项目根目录 <code>tools/cookie-helper.html</code> 一键导入。
@@ -1001,6 +1023,7 @@ function App() {
   const { toasts, show: toast } = useToast();
   const [loggedIn, setLoggedIn] = useState(false);
   const [headlessOnly, setHeadlessOnly] = useState(false);
+  const [playwrightMissing, setPlaywrightMissing] = useState(false);
   const [serverDown, setServerDown] = useState(false);
   const [subscriptions, setSubscriptions] = useState([]);
   const [fetchStatuses, setFetchStatuses] = useState({}); // uid -> status obj (来自 SSE)
@@ -1052,6 +1075,8 @@ function App() {
         setLoggedIn(true);
         const name = data.userInfo?.name || data.userInfo?.uid || '';
         toast(name ? `✅ 登录成功！欢迎 ${name}` : '✅ 登录成功！Cookie 已持久化', 'success', 5000);
+      } else if (data.playwrightMissing) {
+        setPlaywrightMissing(true);
       }
     }
   });
@@ -1082,6 +1107,7 @@ function App() {
       if (res.success) {
         setLoggedIn(res.data.loggedIn);
         setHeadlessOnly(!!res.data.headlessOnly);
+        setPlaywrightMissing(!!res.data.playwrightMissing);
         setServerDown(false);
       }
     } catch (_) { setServerDown(true); }
@@ -1504,7 +1530,7 @@ function App() {
       </div>
 
       {showAddModal && <AddSubscriptionModal onClose={() => setShowAddModal(false)} onAdded={refreshSubscriptions} toast={toast} />}
-      {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onLoginSuccess={() => { setLoggedIn(true); refreshAuth(); }} toast={toast} headlessOnly={headlessOnly} />}
+      {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onLoginSuccess={() => { setLoggedIn(true); refreshAuth(); }} toast={toast} headlessOnly={headlessOnly} playwrightMissing={playwrightMissing} />}
       {showLogs && <LogPanel onClose={() => setShowLogs(false)} />}
       <ToastContainer toasts={toasts} />
     </div>

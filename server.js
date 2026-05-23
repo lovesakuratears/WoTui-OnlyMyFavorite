@@ -41,6 +41,24 @@ function detectHeadlessOnlyEnv() {
 }
 const IS_HEADLESS_ONLY = detectHeadlessOnlyEnv();
 
+/**
+ * 检查 Playwright Chromium 浏览器二进制是否真的安装到本机
+ * Playwright 模块本身（require('playwright')）不代表浏览器已下载，
+ * `npx playwright install chromium` 才会下到 ~/Library/Caches/ms-playwright/
+ */
+function getPlaywrightStatus() {
+  try {
+    const exe = chromium.executablePath();
+    if (!exe) return { available: false, executablePath: null, reason: 'executablePath 为空' };
+    if (!fs.existsSync(exe)) return { available: false, executablePath: exe, reason: '可执行文件不存在' };
+    return { available: true, executablePath: exe };
+  } catch (e) {
+    return { available: false, executablePath: null, reason: e.message || String(e) };
+  }
+}
+
+const PLAYWRIGHT_INSTALL_HINT = '请在 WoTui 项目目录运行：npx playwright install chromium（约 150MB，仅需一次）。如不便安装，可改用本项目根目录的 tools/wotui-cookie-export.js（自动处理依赖）。';
+
 // ─── 目录初始化 ────────────────────────────────────────────────────────────────
 
 const DATA_DIR = path.join(__dirname, 'data');
@@ -1590,6 +1608,7 @@ app.get('/api/auth/status', async (req, res) => {
         : null,
       verifyResult: verifyResult || undefined,
       headlessOnly: IS_HEADLESS_ONLY,
+      playwrightMissing: !getPlaywrightStatus().available,
     }
   });
 });
@@ -1610,6 +1629,19 @@ app.post('/api/auth/login', async (req, res) => {
     });
   }
 
+  // 预检 Playwright Chromium 是否已安装（否则 chromium.launch 会异步抛错，前端拿不到反馈）
+  const pwStatus = getPlaywrightStatus();
+  if (!pwStatus.available) {
+    loginLogger.error(`Playwright Chromium 未安装: ${pwStatus.reason}`, { executablePath: pwStatus.executablePath });
+    return res.status(503).json({
+      success: false,
+      playwrightMissing: true,
+      error: `Playwright Chromium 浏览器未安装（${pwStatus.reason}）。${PLAYWRIGHT_INSTALL_HINT}`,
+      installCommand: 'npx playwright install chromium',
+      executablePath: pwStatus.executablePath,
+    });
+  }
+
   // 如果已有待确认的登录窗口，直接返回
   if (pendingLoginContext) {
     return res.json({ success: true, message: '登录窗口已打开，请在浏览器中完成登录后点击「我已完成登录」', pending: true });
@@ -1618,7 +1650,23 @@ app.post('/api/auth/login', async (req, res) => {
   loginLogger.info('收到登录请求，打开浏览器...');
   res.json({ success: true, message: '已打开微博登录窗口，请在弹出的浏览器中完成登录', pending: true });
 
-  openLoginWindow().catch(err => loginLogger.error(`打开登录窗口异常: ${err.message}`));
+  openLoginWindow().catch(err => {
+    loginLogger.error(`打开登录窗口异常: ${err.message}`);
+    // 通过 SSE 通知前端，避免用户一直等不出登录窗口
+    const isMissingBrowser = /Executable doesn't exist|playwright install/i.test(err.message || '');
+    const friendlyMsg = isMissingBrowser
+      ? `打开登录窗口失败：Playwright Chromium 未安装。${PLAYWRIGHT_INSTALL_HINT}`
+      : `打开登录窗口失败：${err.message}`;
+    const payload = `data: ${JSON.stringify({
+      type: 'loginResult',
+      success: false,
+      message: friendlyMsg,
+      playwrightMissing: isMissingBrowser,
+    })}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(payload); } catch (_) { sseClients.delete(client); }
+    }
+  });
 });
 
 /**
@@ -2184,6 +2232,7 @@ app.get('/api/health', (req, res) => {
     rateLimits: RATE_LIMIT,
     cacheSize: postCache.size,
     headlessOnly: IS_HEADLESS_ONLY,
+    playwrightMissing: !getPlaywrightStatus().available,
   });
 });
 
