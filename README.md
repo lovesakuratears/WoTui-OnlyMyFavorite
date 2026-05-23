@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="/logo/logo.png" width="100" height="100" alt="WoTui Logo">
+  <img width="256" height="256" alt="logo" src="https://github.com/user-attachments/assets/d35cc3a0-f343-4789-a270-e7a12958bbd3" />
   <h1 align="center" style="margin-top: 12px; font-size: 2.2em; background: linear-gradient(135deg, #ff3366, #ee0979); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">WoTui · OnlyMyFavorite</h1>
   <p align="center" style="font-size: 1.1em; color: #888;">
     订阅你喜欢的微博用户，本地完整归档帖子内容（文字 + 图片）
@@ -16,7 +16,8 @@
 
 ## 🌟 项目简介
 
-WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微博用户，定时自动抓取并本地保存其全部帖子与图片。支持 Docker 一键部署，数据完全存储在本地，隐私安全。
+WoTui（我推）是一个微博内容归档工具，帮助你订阅关注的微博用户，定时自动获取并本地保存其全部帖子与图片。支持 Docker 一键部署，数据完全存储在本地，隐私安全。
+注：本项目为Vibe Coding项目，有问题可自行AI
 
 ---
 
