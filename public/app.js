@@ -1,5 +1,7 @@
 /* ============================================================
-   WoTui · OnlyMyFavorite v0.3.0 - 前端应用
+   WoTui · OnlyMyFavorite v1.0.0 - 前端应用
+   v1.0.0: 正式版发布 / CloakBrowser 隐形内核 / Docker 无头登录一体化面板
+   v0.5.0: Docker环境下也支持弹出用户浏览器/移除环境检测和Cookie校验/使用本地数据/默认端口3030
    v0.3.0: 项目改名 / 现代暗色UI重设计 / 居中布局 / Docker支持 / Demo数据
    v0.2.0: 搜索功能 / 全量强制抓取 / 分页控件 / 图片下载 / 搜索高亮
    v0.1.0: 全量只允许首次 / 已有帖子缺图片补全 / Cookie失效后图片不丢失
@@ -713,12 +715,48 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
   const [mode, setMode] = useState(autoDisabled ? 'manual' : 'auto');
   const [cookieStr, setCookieStr] = useState('');
   const [loading, setLoading] = useState(false);
-  const [windowOpen, setWindowOpen] = useState(false); // 登录窗口是否已打开
-  const [confirming, setConfirming] = useState(false); // 正在提交"我已完成登录"
+  const [windowOpen, setWindowOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [verifyResult, setVerifyResult] = useState(null);
+  const [dockerMode, setDockerMode] = useState(false);
+  const [screenshotTimestamp, setScreenshotTimestamp] = useState(Date.now());
+  const [screenLogs, setScreenLogs] = useState([]);
+  const [screenReady, setScreenReady] = useState(false);
+  const [screenError, setScreenError] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+  // Docker 模式下每 2 秒刷新截图
+  useEffect(() => {
+    if (!dockerMode) return;
+    const timer = setInterval(() => {
+      setScreenshotTimestamp(Date.now());
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [dockerMode]);
+
+  // Docker 模式下每秒增加计时
+  useEffect(() => {
+    if (!dockerMode) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      setElapsedSeconds(s => s + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [dockerMode]);
 
   // 监听 SSE 登录事件
   useSSE((data) => {
+    if (data.type === 'loginDockerMode') {
+      setDockerMode(true);
+      setWindowOpen(true);
+      setLoading(false);
+      setScreenLogs(['[Docker] 打开无头浏览器...']);
+    }
+    if (data.type === 'loginScreenLog') {
+      setScreenLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${data.message}`]);
+    }
     if (data.type === 'loginWindowOpen') {
       setWindowOpen(true);
       setLoading(false);
@@ -775,8 +813,12 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
         return;
       }
       if (res.pending) {
-        // 等待 SSE loginWindowOpen 推送
+        // 等待 SSE loginWindowOpen 推送；3 秒后未收到也显示确认按钮（SSE 可能延迟或断开）
         toast('已打开登录窗口，请在浏览器完成登录...', 'info', 8000);
+        setTimeout(() => {
+          setWindowOpen(true);
+          setLoading(false);
+        }, 3000);
       }
     } catch (_) {
       toast('启动登录窗口失败，请使用手动方式', 'error');
@@ -852,6 +894,76 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
           )}
           {mode === 'auto' ? (
             <div className="login-auto">
+              {dockerMode ? (
+                <>
+                  {/* ── Docker 统一登录面板：截图 + 日志 + 计时 + 确认按钮 ── */}
+                  <div className="docker-panel">
+
+                    {/* 面板标题栏 */}
+                    <div className="docker-panel-header">
+                      <span className="docker-panel-title">🐳 Docker 登录面板</span>
+                      <span className="docker-panel-timer">⏱️ {elapsedSeconds}秒</span>
+                    </div>
+
+                    {/* 截图区域（日志面板内部第一项） */}
+                    <div className="docker-panel-screenshot">
+                      <img
+                        src={`/api/auth/login-screenshot?t=${screenshotTimestamp}`}
+                        alt="登录页面截图"
+                        className="docker-screenshot-img"
+                        style={{ display: screenReady ? 'block' : 'none' }}
+                        onLoad={() => { setScreenReady(true); setScreenError(false); }}
+                        onError={() => { if (!screenReady) setScreenError(true); }}
+                      />
+                      {!screenReady && (
+                        <div className="docker-screenshot-placeholder">
+                          <div>⏳ 等待登录页面加载...</div>
+                          <div className="docker-placeholder-sub">已等待 {elapsedSeconds} 秒</div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 日志条目区 */}
+                    <div className="docker-panel-logs">
+                      <div className="docker-logs-title">📋 登录状态日志</div>
+                      <div className="docker-logs-content">
+                        {screenLogs.map((log, i) => (
+                          <div key={i} className="docker-log-entry">{log}</div>
+                        ))}
+                        {screenLogs.length === 0 && (
+                          <div className="docker-log-empty">等待登录流程启动...</div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* 超时提示（15秒后截图仍不显示） */}
+                    {elapsedSeconds > 15 && !screenReady && (
+                      <div className="docker-panel-timeout">
+                        ⏰ 截图已等待 {elapsedSeconds} 秒仍未显示，请检查：<br/>
+                        1. 容器日志：<code>docker compose logs -f</code><br/>
+                        2. 截图文件：<code>docker exec wotui cat /app/data/login-screenshot.jpg | base64</code>
+                      </div>
+                    )}
+
+                    {/* 确认按钮区 */}
+                    <div className="docker-panel-footer">
+                      <button
+                        className="docker-confirm-btn"
+                        onClick={handleConfirmLogin}
+                        disabled={confirming}
+                      >
+                        {confirming ? '⟳ 正在验证 Cookie...' : '✅ 我已完成登录（手动确认）'}
+                      </button>
+                      {screenLogs.length > 0 && (
+                        <div className="docker-hint">
+                          请用手机微博 App 扫描上方的二维码完成登录，系统会自动检测并保存 Cookie
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
               <div className="login-icon">📱</div>
               {!windowOpen ? (
                 <>
@@ -891,6 +1003,8 @@ function LoginModal({ onClose, onLoginSuccess, toast, headlessOnly, playwrightMi
                     ? `✅ 验证成功，当前账号：${verifyResult.name || verifyResult.uid}`
                     : `⚠️ ${verifyResult.error || '验证失败'}`}
                 </div>
+              )}
+              </>
               )}
             </div>
           ) : (
@@ -1291,9 +1405,9 @@ function App() {
       {/* 顶部导航 */}
       <header className="app-header">
         <div className="header-left">
-          <span className="app-logo">W</span>
+          <img src="/logo.png" className="app-logo" alt="WoTui" />
           <div>
-            <div className="app-title">WoTui <span className="version-badge">v0.3.0</span></div>
+            <div className="app-title">WoTui <span className="version-badge">v1.0.0</span></div>
             <div className="app-subtitle">OnlyMyFavorite</div>
           </div>
         </div>

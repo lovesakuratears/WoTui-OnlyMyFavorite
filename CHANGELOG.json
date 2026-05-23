@@ -1,15 +1,30 @@
-{
-    "date":  "2026-05-23",
-    "previousVersion":  "0.3.0",
-    "version":  "0.4.0",
-    "changes":  [
-                    "修复：Docker / 无 GUI 环境检测，登录请求自动拒绝并引导手动 Cookie（解决 Playwright Missing X server）",
-                    "修复：Cookie 在线验证失败时清空磁盘，防止伪登录态（点登录显示已登录）",
-                    "修复：browserFetch 识别微博登录页 HTML（window.use_fp / 扫描二维码登录），返回 loginRequired 提示重新登录",
-                    "修复：侧边栏布局裁切（header/search/pagination 固定，列表区独立滚动；新增紧凑分页样式适配 280px 窄宽）",
-                    "新增：独立工具 tools/cookie-helper.html — 在物理机浏览器导出 m.weibo.cn Cookie，一键推送到 Docker 实例",
-                    "调整：set-cookie 端点默认 domain 改为 .weibo.cn（放弃反爬严重的 weibo.com 路径）",
-                    "新增：/api/auth/status 与 /api/health 暴露 headlessOnly 字段供前端 / 工具判断环境",
-                    "新增：LoginModal 在 headlessOnly 环境下自动切到手动 Cookie 标签并显示 Docker 提示横幅"
-                ]
-}
+[
+    {
+        "version": "1.0.0",
+        "date": "2026-05-24",
+        "changes": [
+            "正式版发布！版本号从 v0.5.0 升级至 v1.0.0",
+            "新增：CloakBrowser 隐形 Chromium 内核（C++ 源码级防反爬）",
+            "新增：Docker 无头模式登录（headless:true + 截图实时推送 + Cookie 自动监测）",
+            "新增：Docker 登录面板一体化设计（截图 + 日志 + 计时器 + 确认按钮）",
+            "新增：登录面板实时计时器（显示已等待秒数）",
+            "新增：截图 SSE 推送事件（截图大小等信息显示在日志中）",
+            "新增：项目主 logo（SVG 版 W 标志）",
+            "修复：截图图片始终渲染，确保 onLoad 事件能正确触发",
+            "修复：Docker 截图超时后重新连接的稳定性",
+            "移除：Playwright 内置 Chromium 依赖，全面迁移至 CloakBrowser"
+        ]
+    },
+    {
+        "date": "2025-05-23",
+        "previousVersion": "0.4.0",
+        "version": "0.5.0",
+        "changes": [
+            "修改：Docker 环境下也支持弹出用户本地浏览器，不再检测 headless 环境",
+            "移除：Cookie 在线验证，信任用户手动输入的 Cookie",
+            "调整：默认端口从 3000 改为 3030",
+            "调整：Docker 构建使用本地 data 目录而非 demo-data 目录",
+            "修复：LoginModal 在所有环境下都支持自动登录功能"
+        ]
+    }
+]

@@ -1,7 +1,9 @@
 /**
- * server.js - WoTui · OnlyMyFavorite 后端服务 v0.4.0
+ * server.js - WoTui · OnlyMyFavorite 后端服务 v1.0.0
  *
  * 变更记录：
+ *   v1.0.0 - 正式版发布 / Docker 无头登录 + CloakBrowser 隐形内核 / 截图日志一体化面板
+ *   v0.5.0 - Docker环境下也支持弹出用户浏览器/移除环境检测和Cookie校验/使用本地数据/默认端口3030
  *   v0.3.0 - 项目改名 WoTui / Docker 支持 / Demo 数据 / 现代化 UI
  *   v0.2.0 - 搜索 API / 全量强制抓取(force) / 全量覆盖更新 / 图片下载 / health 返回版本号
  *   v0.1.0 - 全量只允许首次（有数据自动增量）/ 已有帖子缺图片补全 / Cookie失效后图片不再丢失
@@ -23,32 +25,42 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { chromium } = require('playwright');
+const { exec } = require('child_process');
 const axios = require('axios');
 
-const app = express();
-const PORT = 3000;
-
-// ─── 运行环境检测 ──────────────────────────────────────────────────────────────
-// Docker / 无 DISPLAY 环境无法弹出有头浏览器，需引导用户使用手动 Cookie 模式
-function detectHeadlessOnlyEnv() {
-  if (process.env.WOTUI_HEADED === '1') return false; // 显式覆盖
-  if (process.env.WOTUI_DOCKER === '1') return true;
-  if (process.platform === 'linux' && !process.env.DISPLAY) return true;
-  try {
-    if (fs.existsSync('/.dockerenv')) return true;
-  } catch (_) {}
-  return false;
+// CloakBrowser 动态导入（ESM 包，用 import() 在 CJS 中使用）
+let _cloakModule = null;
+async function getCloakBrowser() {
+  if (!_cloakModule) {
+    _cloakModule = await import('cloakbrowser');
+  }
+  return _cloakModule;
 }
-const IS_HEADLESS_ONLY = detectHeadlessOnlyEnv();
+// 同步检测 cloakbrowser 二进制是否已下载
+function getCloakBinaryPath() {
+  const cacheDir = process.env.CLOAKBROWSER_CACHE_DIR ||
+    path.join(os.homedir(), '.cloakbrowser');
+  try {
+    if (!fs.existsSync(cacheDir)) return null;
+    const entries = fs.readdirSync(cacheDir);
+    for (const e of entries) {
+      const full = path.join(cacheDir, e);
+      if (fs.statSync(full).isDirectory()) {
+        const chromePath = path.join(full, 'chrome');
+        if (fs.existsSync(chromePath)) return chromePath;
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+const app = express();
+const PORT = 3030;
 
 /**
- * 检测可用的 Chromium 内核浏览器，优先级：
+ * 检测可用的浏览器内核，优先级：
  *   1) 系统已装的 Chrome / Edge / Brave / Chromium / Arc / Vivaldi
- *      → 0 下载、版本随系统更新、用户体感更友好
- *   2) Playwright 内置 Chromium（npx playwright install chromium 落到 ~/Library/Caches/...）
- *      → 兜底
- * 探测结果会被缓存在 BROWSER_CACHE，避免每次请求都做 fs.existsSync。
+ *   2) CloakBrowser 隐形 Chromium（C++ 源码级防检测）
  */
 function getSystemBrowserCandidates() {
   const home = os.homedir();
@@ -114,17 +126,13 @@ function detectBrowser({ refresh = false } = {}) {
     } catch (_) {}
   }
 
-  // 2) Playwright 内置 Chromium
-  try {
-    const exe = chromium.executablePath();
-    if (exe && fs.existsSync(exe)) {
-      BROWSER_CACHE = { available: true, source: 'bundled', name: 'Playwright Chromium', executablePath: exe, reason: null };
-      return BROWSER_CACHE;
-    }
-    BROWSER_CACHE = { available: false, source: null, name: null, executablePath: exe || null, reason: exe ? '可执行文件不存在' : 'executablePath 为空' };
-  } catch (e) {
-    BROWSER_CACHE = { available: false, source: null, name: null, executablePath: null, reason: e.message || String(e) };
+  // 2) CloakBrowser 隐形 Chromium
+  const cloakPath = getCloakBinaryPath();
+  if (cloakPath) {
+    BROWSER_CACHE = { available: true, source: 'cloakbrowser', name: 'CloakBrowser Chromium', executablePath: cloakPath, reason: null };
+    return BROWSER_CACHE;
   }
+  BROWSER_CACHE = { available: false, source: null, name: null, executablePath: cloakPath, reason: '未找到任何浏览器' };
   return BROWSER_CACHE;
 }
 
@@ -132,18 +140,18 @@ function detectBrowser({ refresh = false } = {}) {
 function getPlaywrightStatus() { return detectBrowser(); }
 
 /**
- * 生成 chromium.launch 配置：若发现系统浏览器则注入 executablePath，
- * 否则交给 Playwright 用 bundled Chromium。
+ * 生成 cloakbrowser launch 配置：优先使用系统浏览器 executablePath，
+ * 否则交给 CloakBrowser 自动管理。
  */
 function withDetectedBrowser(opts = {}) {
   const b = detectBrowser();
-  if (b.available && b.executablePath && b.source === 'system') {
+  if (b.available && b.executablePath) {
     return { ...opts, executablePath: b.executablePath };
   }
   return opts;
 }
 
-const PLAYWRIGHT_INSTALL_HINT = '建议安装 Chrome（推荐）/ Edge / Brave 任一浏览器即可，工具会自动复用。如不想装外部浏览器，可在 WoTui 项目目录运行：npx playwright install chromium（约 150MB，仅需一次）；也可使用项目根目录的 tools/wotui-cookie-export.js 在本机直接导出 Cookie。';
+const BROWSER_INSTALL_HINT = '建议安装 Chrome（推荐）/ Edge / Brave 任一浏览器即可，工具会自动复用。在 Docker 环境下会自动使用 CloakBrowser 隐形 Chromium（自动下载约 200MB，C++ 源码级防反爬）。';
 
 // ─── 目录初始化 ────────────────────────────────────────────────────────────────
 
@@ -217,11 +225,13 @@ function log(level, module_, message, meta = {}) {
   // 写文件（不阻塞）
   try { getLogStream().write(line + '\n'); } catch (_) {}
 
-  // 控制台输出（带颜色）
+  // 控制台输出（带颜色），忽略 EPIPE 错误（后台运行时 stdout 可能关闭）
   const colors = { silly: '\x1b[37m', debug: '\x1b[36m', info: '\x1b[32m', warn: '\x1b[33m', error: '\x1b[31m' };
   const reset = '\x1b[0m';
   const color = colors[level] || '';
-  console.log(`${color}[${entry.ts.slice(11, 19)}][${level.toUpperCase().padEnd(5)}][${module_}]${reset} ${message}${Object.keys(meta).length ? ' ' + JSON.stringify(meta) : ''}`);
+  try {
+    console.log(`${color}[${entry.ts.slice(11, 19)}][${level.toUpperCase().padEnd(5)}][${module_}]${reset} ${message}${Object.keys(meta).length ? ' ' + JSON.stringify(meta) : ''}`);
+  } catch (_) {}
 
   // SSE 推送
   const ssePayload = `data: ${line}\n\n`;
@@ -273,6 +283,19 @@ let isLoggedIn = false;
 // v0.0.5：用于手动确认登录的浏览器上下文（全局持有，直到用户确认或超时）
 let pendingLoginContext = null;
 let pendingLoginPage = null;
+let pendingTempUserDataDir = null; // Chrome 临时用户数据目录，关闭时清理
+
+// v0.5.0：Docker 无头模式截图缓冲区
+let loginScreenshotBuffer = null;
+
+// v0.5.0：Docker 环境检测
+function isDockerEnv() {
+  try {
+    if (fs.existsSync('/.dockerenv')) return true;
+  } catch (_) {}
+  if (process.platform === 'linux' && !process.env.DISPLAY) return true;
+  return false;
+}
 
 // ─── v0.0.8：并发任务队列 + 终止信号 ─────────────────────────────────────────
 
@@ -343,10 +366,15 @@ function abortFetch(uid) {
 }
 
 async function closePendingLogin() {
-  try { if (pendingLoginContext) { await pendingLoginContext.close(); } } catch (_) {}
+  try { if (pendingLoginContext) await pendingLoginContext.close(); } catch (_) {}
   try { if (loginBrowser) { await loginBrowser.close(); loginBrowser = null; } } catch (_) {}
+  if (pendingTempUserDataDir) {
+    try { fs.rmSync(pendingTempUserDataDir, { recursive: true, force: true }); } catch (_) {}
+    pendingTempUserDataDir = null;
+  }
   pendingLoginContext = null;
   pendingLoginPage = null;
+  loginScreenshotBuffer = null;
 }
 
 // ─── 进程防崩溃保护 ──────────────────────────────────────────────────────────
@@ -356,8 +384,15 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 process.on('uncaughtException', (err) => {
-  createLogger('Process').error(`未捕获的同步异常: ${err.message}`, { stack: err.stack?.slice(0, 500) });
-  // 不退出进程，尝试继续运行（仅日志记录）
+  // 直接写文件，避免级联调用 console.log 导致无限 EPIPE
+  try {
+    const entry = JSON.stringify({ ts: new Date().toISOString(), level: 'error', module: 'Process', message: `未捕获的同步异常: ${err.message}` });
+    fs.appendFileSync(getLogFilePath(), entry + '\n');
+    const ssePayload = `data: ${entry}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(ssePayload); } catch (_) { sseClients.delete(client); }
+    }
+  } catch (_) {}
 });
 
 // ─── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -656,70 +691,282 @@ async function openLoginWindow() {
     loginBrowser = null;
   }
 
-  loginLogger.info('打开登录窗口（移动端）...');
+  const IS_DOCKER = isDockerEnv();
+  loginLogger.info(`打开登录窗口（${IS_DOCKER ? 'Docker 无头模式' : '本地有头模式'}）...`);
 
-  const mobileContextOptions = {
-    userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
-    viewport: { width: 390, height: 844 },
-    locale: 'zh-CN',
-    timezoneId: 'Asia/Shanghai',
-    extraHTTPHeaders: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
-    isMobile: true,
-    hasTouch: true,
-  };
+  const loginUrl = 'https://m.weibo.cn/login';
 
-  loginBrowser = await chromium.launch(withDetectedBrowser({
-    headless: false,
-    args: [...BROWSER_ARGS, '--window-size=420,900'],
-  }));
-  const context = await loginBrowser.newContext(mobileContextOptions);
-  await context.addInitScript(INIT_SCRIPT);
-  const page = await context.newPage();
+  if (IS_DOCKER) {
+    // ── Docker 无头模式：headless:true + 截图推送 + Cookie 自动监测 ──
+    loginLogger.info('Docker 环境：使用无头浏览器 + 截图模式');
 
-  await page.goto('https://m.weibo.cn/login', { waitUntil: 'domcontentloaded', timeout: 30000 });
-  loginLogger.info('登录窗口已打开 (m.weibo.cn)，等待用户操作...');
+    const { launch } = await getCloakBrowser();
+    const launchOptions = withDetectedBrowser({
+      headless: true,
+      args: BROWSER_ARGS,
+    });
 
-  // 推送 SSE：窗口已打开，等待用户手动确认
-  const openPayload = `data: ${JSON.stringify({
-    type: 'loginWindowOpen',
-    message: '请在弹出的浏览器窗口中完成登录，完成后点击「我已完成登录」按钮',
-  })}\n\n`;
-  for (const client of sseClients) {
-    try { client.write(openPayload); } catch (_) { sseClients.delete(client); }
-  }
+    const browser = await launch(launchOptions);
+    loginBrowser = browser;
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+      viewport: { width: 390, height: 844 },
+      locale: 'zh-CN',
+      timezoneId: 'Asia/Shanghai',
+      extraHTTPHeaders: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      isMobile: true,
+      hasTouch: true,
+    });
+    await context.addInitScript(INIT_SCRIPT);
+    const page = await context.newPage();
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    loginLogger.info('Docker 无头浏览器登录页面已加载');
 
-  // 将 context 挂载到全局，供 confirmLogin 接口使用
-  pendingLoginContext = context;
-  pendingLoginPage = page;
+    pendingLoginContext = context;
+    pendingLoginPage = page;
 
-  // 10 分钟超时自动关闭
-  const timeoutTimer = setTimeout(async () => {
-    loginLogger.warn('登录超时（10分钟），自动关闭');
-    const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '登录超时（10分钟），请重试' })}\n\n`;
-    for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
-    await closePendingLogin();
-  }, 10 * 60 * 1000);
+    // 推送 Docker 模式事件
+    const dockerPayload = `data: ${JSON.stringify({
+      type: 'loginDockerMode',
+      message: 'Docker 环境：已打开无头浏览器，准备加载二维码',
+    })}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(dockerPayload); } catch (_) { sseClients.delete(client); }
+    }
 
-  // 用户手动关闭窗口时的处理
-  page.on('close', async () => {
-    if (!pendingLoginContext) return; // 已被 confirmLogin 处理
-    clearTimeout(timeoutTimer);
-    loginLogger.info('用户手动关闭了登录窗口（未确认）');
-    // 关窗即视为用户放弃确认；如有 Cookie 仍保留备用，不做在线校验
-    try {
-      const cookies = await context.cookies().catch(() => []);
-      if (cookies && cookies.length > 0) {
-        saveCookies(cookies);
-        isLoggedIn = true;
-        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: `窗口已关闭，已保存 ${cookies.length} 条 Cookie（未校验）`, userInfo: {} })}\n\n`;
-        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
-      } else {
-        const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未采集到任何 Cookie' })}\n\n`;
-        for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+    // 推送窗口打开事件（保持前端兼容）
+    const openPayload = `data: ${JSON.stringify({
+      type: 'loginWindowOpen',
+      message: '已打开登录窗口（无头模式），请在下方完成登录',
+    })}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(openPayload); } catch (_) { sseClients.delete(client); }
+    }
+
+    // 截图循环：立即拍第一张，之后每 2 秒刷新
+    const sendLogEvent = (msg) => {
+      const payload = `data: ${JSON.stringify({ type: 'loginScreenLog', message: msg })}\n\n`;
+      for (const client of sseClients) {
+        try { client.write(payload); } catch (_) { sseClients.delete(client); }
       }
-    } catch (_) {}
-    await closePendingLogin();
-  });
+    };
+
+    const takeScreenshot = async () => {
+      try {
+        const pages = context.pages();
+        if (pages.length === 0) return;
+        const buf = await pages[0].screenshot({ type: 'jpeg', quality: 80, fullPage: false });
+        loginScreenshotBuffer = buf;
+        // 同时保存到磁盘，方便通过容器日志/文件查看
+        try {
+          const dataDir = path.join(__dirname, 'data');
+          if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+          fs.writeFileSync(path.join(dataDir, 'login-screenshot.jpg'), buf);
+        } catch (_) {}
+        // 发送截图就绪日志事件（含文件大小）
+        const sizeKB = (buf.length / 1024).toFixed(1);
+        const sseLogPayload = `data: ${JSON.stringify({ type: 'loginScreenLog', message: `📷 截图已更新 (${sizeKB}KB)`, screenshotSize: buf.length })}\n\n`;
+        for (const client of sseClients) {
+          try { client.write(sseLogPayload); } catch (_) { sseClients.delete(client); }
+        }
+      } catch (_) {}
+    };
+    await takeScreenshot().catch(() => {});
+    loginLogger.info('第一张截图已就绪（/app/data/login-screenshot.jpg）');
+    sendLogEvent('截图已就绪');
+    const screenshotInterval = setInterval(takeScreenshot, 2000);
+
+    // 异步加载二维码（不阻塞截图）
+    (async () => {
+      try {
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+        await new Promise(r => setTimeout(r, 2000));
+        sendLogEvent('页面加载完成');
+        const scanBtn = page.locator('text=扫码登录').first();
+        if (await scanBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+          await scanBtn.click();
+          loginLogger.info('已点击"扫码登录"按钮，等待二维码加载');
+          sendLogEvent('已点击"扫码登录"按钮');
+          await page.waitForSelector('img[src*="qrcode"]', { timeout: 10000 }).catch(() => {});
+          await new Promise(r => setTimeout(r, 1500));
+          await takeScreenshot().catch(() => {});
+          loginLogger.info('二维码截图已更新');
+          sendLogEvent('二维码截图已更新');
+        } else {
+          sendLogEvent('未找到"扫码登录"按钮，使用默认视图');
+        }
+      } catch (e) {
+        loginLogger.warn(`二维码切换异常: ${e.message}，使用默认视图`);
+        sendLogEvent('二维码切换异常，使用默认视图');
+      }
+    })().catch(() => {});
+
+    // Cookie 自动监测循环（每 3 秒检查一次）
+    let autoConfirmed = false;
+    const cookieMonitor = setInterval(async () => {
+      try {
+        if (!pendingLoginContext || autoConfirmed) return;
+        const cookies = await pendingLoginContext.cookies();
+        const pagesList = pendingLoginContext.pages();
+        if (pagesList.length === 0) return;
+        const currentUrl = pagesList[0].url();
+        const hasSUB = cookies.some(c =>
+          c.name === 'SUB' && c.value && c.value.length > 20
+        );
+        const hasSUBP = cookies.some(c =>
+          c.name === 'SUBP' && c.value && c.value.length > 0
+        );
+        const isRedirected = currentUrl &&
+          !currentUrl.includes('/login') &&
+          !currentUrl.includes('/passport') &&
+          currentUrl.includes('weibo');
+        if (hasSUB && hasSUBP && isRedirected) {
+          autoConfirmed = true;
+          clearInterval(screenshotInterval);
+          clearInterval(cookieMonitor);
+          loginLogger.info('Docker 无头浏览器检测到登录完成（页面已跳转 + SUB + SUBP），自动确认');
+
+          saveCookies(cookies);
+          isLoggedIn = true;
+
+          const resultPayload = `data: ${JSON.stringify({
+            type: 'loginResult',
+            success: true,
+            message: `✅ 已自动保存 ${cookies.length} 条 Cookie`,
+            userInfo: {},
+          })}\n\n`;
+          for (const client of sseClients) {
+            try { client.write(resultPayload); } catch (_) { sseClients.delete(client); }
+          }
+
+          await closePendingLogin();
+          loginScreenshotBuffer = null;
+          clearTimeout(timeoutTimer);
+        }
+      } catch (_) {}
+    }, 3000);
+
+    // 10 分钟超时自动关闭
+    const timeoutTimer = setTimeout(async () => {
+      loginLogger.warn('Docker 登录超时（10分钟），自动关闭');
+      clearInterval(screenshotInterval);
+      clearInterval(cookieMonitor);
+      const payload = `data: ${JSON.stringify({
+        type: 'loginResult',
+        success: false,
+        message: '登录超时（10分钟），请重试',
+      })}\n\n`;
+      for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+      await closePendingLogin();
+      loginScreenshotBuffer = null;
+    }, 10 * 60 * 1000);
+
+    // page 意外关闭时的处理
+    page.on('close', async () => {
+      if (autoConfirmed || !pendingLoginContext) return;
+      clearInterval(screenshotInterval);
+      clearInterval(cookieMonitor);
+      clearTimeout(timeoutTimer);
+      loginLogger.info('Docker 无头浏览器页面意外关闭');
+      const payload = `data: ${JSON.stringify({
+        type: 'loginResult',
+        success: false,
+        message: '登录页面意外关闭，请重试',
+      })}\n\n`;
+      for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+      await closePendingLogin();
+      loginScreenshotBuffer = null;
+    });
+  } else {
+    // ── 本地有头模式（保持原有逻辑） ──
+    // 使用临时用户数据目录，强制 Chrome 启动全新独立实例（而非复用已有窗口）
+    const tempUserDataDir = path.join(os.tmpdir(), `wotui-login-${Date.now()}`);
+    pendingTempUserDataDir = tempUserDataDir;
+    loginLogger.info(`临时用户数据目录: ${tempUserDataDir}`);
+
+    // launchPersistentContext = 启动 CloakBrowser 并用指定用户数据目录（保证新实例 + 可见窗口）
+    const { launchPersistentContext } = await getCloakBrowser();
+    const launchOptions = withDetectedBrowser({
+      headless: false,
+      args: [
+        ...BROWSER_ARGS,
+        '--window-size=420,900',
+        '--new-window',
+        '--no-first-run',
+        '--no-default-browser-check',
+      ],
+    });
+    const persistentOptions = {
+      ...launchOptions,
+      userAgent: 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Mobile Safari/537.36',
+      viewport: { width: 390, height: 844 },
+      locale: 'zh-CN',
+      timezoneId: 'Asia/Shanghai',
+      extraHTTPHeaders: { 'Accept-Language': 'zh-CN,zh;q=0.9' },
+      isMobile: true,
+      hasTouch: true,
+    };
+    // launchPersistentContext 的第一个参数是 userDataDir，第二个是选项
+    const context = await launchPersistentContext(tempUserDataDir, persistentOptions);
+    loginLogger.info('Chrome 进程已启动，窗口应已弹出');
+
+    // macOS：延迟激活 Chrome 到前台
+    if (process.platform === 'darwin') {
+      setTimeout(() => {
+        try {
+          exec('osascript -e \'tell application "Google Chrome" to activate\'');
+          loginLogger.info('已通过 AppleScript 激活 Chrome 窗口到前台');
+        } catch (_) {}
+      }, 2000);
+    }
+
+    await context.addInitScript(INIT_SCRIPT);
+    const pages = context.pages();
+    const page = pages.length > 0 ? pages[0] : await context.newPage();
+
+    await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    loginLogger.info('登录页面已加载，等待用户操作...');
+
+    pendingLoginContext = context;
+    pendingLoginPage = page;
+
+    // 推送 SSE：窗口已打开，等待用户手动确认
+    const openPayload = `data: ${JSON.stringify({
+      type: 'loginWindowOpen',
+      message: '请在弹出的浏览器窗口中完成登录，完成后点击「我已完成登录」按钮',
+    })}\n\n`;
+    for (const client of sseClients) {
+      try { client.write(openPayload); } catch (_) { sseClients.delete(client); }
+    }
+
+    // 10 分钟超时自动关闭
+    const timeoutTimer = setTimeout(async () => {
+      loginLogger.warn('登录超时（10分钟），自动关闭');
+      const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '登录超时（10分钟），请重试' })}\n\n`;
+      for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+      await closePendingLogin();
+    }, 10 * 60 * 1000);
+
+    // 用户手动关闭窗口时的处理
+    page.on('close', async () => {
+      if (!pendingLoginContext) return; // 已被 confirmLogin 处理
+      clearTimeout(timeoutTimer);
+      loginLogger.info('用户手动关闭了登录窗口（未确认）');
+      try {
+        const cookies = await context.cookies().catch(() => []);
+        if (cookies && cookies.length > 0) {
+          saveCookies(cookies);
+          isLoggedIn = true;
+          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: true, message: `窗口已关闭，已保存 ${cookies.length} 条 Cookie（未校验）`, userInfo: {} })}\n\n`;
+          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+        } else {
+          const payload = `data: ${JSON.stringify({ type: 'loginResult', success: false, message: '窗口已关闭，未采集到任何 Cookie' })}\n\n`;
+          for (const client of sseClients) { try { client.write(payload); } catch (_) {} }
+        }
+      } catch (_) {}
+      await closePendingLogin();
+    });
+  }
 }
 
 function logout() {
@@ -759,7 +1006,8 @@ async function getSharedContext(cookies) {
     }
 
     ctxLogger.info('创建后台浏览器上下文...');
-    sharedBrowser = await chromium.launch(withDetectedBrowser({ headless: true, args: BROWSER_ARGS }));
+    const { launch } = await getCloakBrowser();
+    sharedBrowser = await launch(withDetectedBrowser({ headless: true, args: BROWSER_ARGS }));
     const context = await sharedBrowser.newContext({ ...CONTEXT_OPTIONS });
     await context.addInitScript(INIT_SCRIPT);
 
@@ -1688,7 +1936,7 @@ app.get('/api/auth/status', async (req, res) => {
         ? new Date(cookies[0].expires * 1000).toISOString()
         : null,
       verifyResult: verifyResult || undefined,
-      headlessOnly: IS_HEADLESS_ONLY,
+      headlessOnly: false,
       playwrightMissing: !b.available,
       browser: { available: b.available, source: b.source, name: b.name, reason: b.reason },
     }
@@ -1701,16 +1949,6 @@ app.post('/api/auth/login', async (req, res) => {
     return res.json({ success: true, message: '已登录，无需重新登录', alreadyLoggedIn: true });
   }
 
-  // Docker / 无 DISPLAY 环境无法弹出浏览器窗口，引导用户用手动 Cookie 模式
-  if (IS_HEADLESS_ONLY) {
-    loginLogger.warn('当前为无图形界面环境（Docker 等），拒绝打开浏览器窗口');
-    return res.status(400).json({
-      success: false,
-      headlessOnly: true,
-      error: '当前运行在 Docker / 无图形界面环境，无法弹出浏览器窗口。请切换到「手动粘贴 Cookie」标签，或使用 tools/cookie-helper.html 从本机浏览器导出 m.weibo.cn 的 Cookie 提交。',
-    });
-  }
-
   // 预检：检查是否有任何可用浏览器（系统 Chrome/Edge/Brave/... 或 bundled Chromium）
   const bStatus = detectBrowser({ refresh: true }); // 强制刷新缓存，覆盖用户中途安装浏览器的场景
   if (!bStatus.available) {
@@ -1718,8 +1956,8 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(503).json({
       success: false,
       playwrightMissing: true,
-      error: `本机未检测到 Chrome / Edge / Brave / Chromium 等浏览器（${bStatus.reason || '未知原因'}）。${PLAYWRIGHT_INSTALL_HINT}`,
-      installCommand: 'npx playwright install chromium',
+      error: `本机未检测到 Chrome / Edge / Brave / Chromium 等浏览器（${bStatus.reason || '未知原因'}）。${BROWSER_INSTALL_HINT}`,
+      installCommand: 'npm install cloakbrowser',
       executablePath: bStatus.executablePath,
     });
   }
@@ -1737,7 +1975,7 @@ app.post('/api/auth/login', async (req, res) => {
     loginLogger.error(`打开登录窗口异常: ${err.message}`);
     const isMissingBrowser = /Executable doesn't exist|playwright install|spawn .* ENOENT/i.test(err.message || '');
     const friendlyMsg = isMissingBrowser
-      ? `打开登录窗口失败：本机浏览器不可用。${PLAYWRIGHT_INSTALL_HINT}`
+      ? `打开登录窗口失败：本机浏览器不可用。${BROWSER_INSTALL_HINT}`
       : `打开登录窗口失败：${err.message}`;
     const payload = `data: ${JSON.stringify({
       type: 'loginResult',
@@ -1753,7 +1991,7 @@ app.post('/api/auth/login', async (req, res) => {
 
 /**
  * POST /api/auth/confirm-login
- * 用户在前端点击「我已完成登录」后，服务端从浏览器上下文采集 Cookie 并验证
+ * 用户在前端点击「我已完成登录」后，服务端从浏览器上下文采集 Cookie
  */
 app.post('/api/auth/confirm-login', async (req, res) => {
   if (!pendingLoginContext) {
@@ -1812,6 +2050,18 @@ app.post('/api/auth/verify', async (req, res) => {
 app.post('/api/auth/logout', (req, res) => {
   logout();
   res.json({ success: true, message: '已退出登录' });
+});
+
+// GET /api/auth/login-screenshot - Docker 无头模式截图
+app.get('/api/auth/login-screenshot', (req, res) => {
+  if (!loginScreenshotBuffer) {
+    return res.status(404).send('No screenshot available');
+  }
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.send(loginScreenshotBuffer);
 });
 
 // POST /api/auth/set-cookie
@@ -2250,7 +2500,7 @@ app.get('/api/health', (req, res) => {
   const b = detectBrowser();
   res.json({
     success: true,
-    version: '0.4.0',
+    version: '1.0.0',
     uptime: Math.floor(process.uptime()),
     loggedIn: getLoginStatus(),
     subscriptions: readJSON(SUBSCRIPTIONS_FILE, []).length,
@@ -2258,7 +2508,7 @@ app.get('/api/health', (req, res) => {
     logFile: getLogFilePath(),
     rateLimits: RATE_LIMIT,
     cacheSize: postCache.size,
-    headlessOnly: IS_HEADLESS_ONLY,
+    headlessOnly: false,
     playwrightMissing: !b.available,
     browser: { available: b.available, source: b.source, name: b.name, reason: b.reason },
   });
@@ -2268,7 +2518,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
   logger.info(`╔══════════════════════════════════════════╗`);
-  logger.info(`║   微博归档器 v0.4.0  已启动              ║`);
+  logger.info(`║   微博归档器 v1.0.0  已启动              ║`);
   logger.info(`║   http://localhost:${PORT}                  ║`);
   logger.info(`╚══════════════════════════════════════════╝`);
 
@@ -2280,17 +2530,13 @@ app.listen(PORT, () => {
     logger.warn(`⚠️  未登录，请访问 http://localhost:${PORT} 并点击"登录微博"按钮`);
   }
 
-  if (IS_HEADLESS_ONLY) {
-    logger.warn(`🐳 检测到 Docker / 无 DISPLAY 环境，自动登录已禁用，请使用「手动粘贴 Cookie」方式登录`);
+  const b = detectBrowser();
+  if (b.available && b.source === 'system') {
+    logger.info(`🌐 使用系统浏览器：${b.name}（${b.executablePath}）— 无需下载额外组件`);
+  } else if (b.available && b.source === 'cloakbrowser') {
+    logger.info(`🛡️ 使用 CloakBrowser 隐形 Chromium（C++ 源码级防反爬，${b.executablePath}）`);
   } else {
-    const b = detectBrowser();
-    if (b.available && b.source === 'system') {
-      logger.info(`🌐 使用系统浏览器：${b.name}（${b.executablePath}）— 无需下载额外组件`);
-    } else if (b.available && b.source === 'bundled') {
-      logger.info(`🌐 使用 Playwright 内置 Chromium（${b.executablePath}）`);
-    } else {
-      logger.warn(`⚠️  未检测到任何 Chromium 内核浏览器，自动登录将不可用。${PLAYWRIGHT_INSTALL_HINT}`);
-    }
+    logger.warn(`⚠️  未检测到任何浏览器，自动登录将不可用。${BROWSER_INSTALL_HINT}`);
   }
 
   restoreSchedulers();

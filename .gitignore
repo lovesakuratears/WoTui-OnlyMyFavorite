@@ -23,3 +23,7 @@ desktop.ini
 # Environment
 .env
 .env.local
+
+# Misc
+.codegraph/
+logo/

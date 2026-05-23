@@ -115,13 +115,10 @@ input, textarea, select { font-family: inherit; }
 
 .app-logo {
   width: 36px; height: 36px;
-  background: var(--gradient-primary);
   border-radius: 10px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 16px; font-weight: 800;
-  color: #fff;
+  flex-shrink: 0;
+  object-fit: cover;
   box-shadow: 0 4px 12px rgba(255, 51, 102, 0.4);
-  letter-spacing: -0.5px;
 }
 
 .app-title {
@@ -1176,4 +1173,139 @@ mark.search-highlight {
 @media (max-width: 540px) {
   .sidebar { display: none; }
   .main-content { padding: 12px; }
+}
+
+/* ── Docker 统一登录面板 v0.5.0 ── */
+.docker-panel {
+  background: #1a1a2e;
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 12px 0;
+  max-width: 420px;
+  margin-left: auto;
+  margin-right: auto;
+  border: 1px solid #2a2a4e;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+.docker-panel-header {
+  padding: 10px 14px;
+  background: #16162a;
+  border-bottom: 1px solid #2a2a4e;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.docker-panel-title {
+  font-size: 13px;
+  color: #64ffda;
+  font-weight: bold;
+}
+.docker-panel-timer {
+  font-size: 11px;
+  color: #888;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  background: rgba(255,255,255,0.05);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.docker-panel-screenshot {
+  padding: 10px;
+  background: #0d0d1a;
+  text-align: center;
+  border-bottom: 1px solid #2a2a4e;
+  min-height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.docker-screenshot-img {
+  max-width: 280px;
+  width: 100%;
+  height: auto;
+  border-radius: 4px;
+  border: 1px solid #333;
+  display: block;
+  margin: 0 auto;
+}
+.docker-screenshot-placeholder {
+  padding: 24px 16px;
+  color: #666;
+  font-size: 13px;
+  text-align: center;
+}
+.docker-placeholder-sub {
+  font-size: 11px;
+  color: #555;
+  margin-top: 6px;
+}
+.docker-panel-logs {
+  padding: 8px 14px;
+  max-height: 100px;
+  overflow-y: auto;
+  border-bottom: 1px solid #2a2a4e;
+}
+.docker-logs-title {
+  font-size: 11px;
+  color: #64ffda;
+  margin-bottom: 4px;
+  font-weight: bold;
+}
+.docker-logs-content {
+  font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+  font-size: 10px;
+  color: #aaa;
+  line-height: 1.7;
+}
+.docker-log-entry {
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 1px 0;
+}
+.docker-log-empty {
+  color: #555;
+}
+.docker-panel-timeout {
+  padding: 8px 14px;
+  background: #2a1a00;
+  border-bottom: 1px solid #3a2a00;
+  font-size: 11px;
+  color: #ffa726;
+  line-height: 1.6;
+}
+.docker-panel-timeout code {
+  background: rgba(255,255,255,0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+}
+.docker-panel-footer {
+  padding: 10px 14px;
+}
+.docker-confirm-btn {
+  width: 100%;
+  padding: 10px;
+  background: #64ffda;
+  color: #1a1a2e;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.docker-confirm-btn:hover:not(:disabled) {
+  background: #4adec0;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(100, 255, 218, 0.3);
+}
+.docker-confirm-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.docker-hint {
+  font-size: 11px;
+  color: #888;
+  text-align: center;
+  margin-top: 8px;
+  line-height: 1.5;
 }
